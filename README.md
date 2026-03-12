@@ -21,7 +21,7 @@ flowchart LR
 | Folders | `directory/` | Directory listing | Create/delete supported |
 | PDFs | `filename.pdf` | Binary download | No |
 | Images | `filename.png` | Binary download | No |
-| Other files | `filename.ext` | Binary download | Binary upload |
+| Other files | `filename.ext` | Binary download | No |
 
 ### Markdown conversion
 
