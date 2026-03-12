@@ -41,19 +41,19 @@ func NewLoopbackServer() (*LoopbackServer, error) {
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		if errMsg := r.URL.Query().Get("error"); errMsg != "" {
 			errCh <- fmt.Errorf("gdrive: oauth error: %s", errMsg)
-			fmt.Fprint(w, "Authorization failed. You can close this tab.")
+			_, _ = fmt.Fprint(w, "Authorization failed. You can close this tab.")
 			return
 		}
 
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			errCh <- fmt.Errorf("gdrive: no authorization code in callback")
-			fmt.Fprint(w, "Authorization failed: no code received. You can close this tab.")
+			_, _ = fmt.Fprint(w, "Authorization failed: no code received. You can close this tab.")
 			return
 		}
 
 		codeCh <- code
-		fmt.Fprint(w, "Authorization successful! You can close this tab and return to the terminal.")
+		_, _ = fmt.Fprint(w, "Authorization successful! You can close this tab and return to the terminal.")
 	})
 
 	srv.server = &http.Server{Handler: mux}
