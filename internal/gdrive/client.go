@@ -118,7 +118,7 @@ func (c *Client) DownloadFile(ctx context.Context, fileID string) ([]byte, error
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		data, err = io.ReadAll(resp.Body)
 		return err
@@ -239,7 +239,7 @@ func (c *Client) ExportDoc(ctx context.Context, docID string, mimeType string) (
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		data, err = io.ReadAll(resp.Body)
 		return err

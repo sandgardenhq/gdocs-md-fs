@@ -401,7 +401,12 @@ func (b *requestBuilder) handleAutoLink(n *ast.AutoLink, source []byte) {
 func (b *requestBuilder) handleImage(n *ast.Image, source []byte) {
 	// Google Docs API doesn't support inline image insertion via InsertText.
 	// We insert the alt text as a placeholder and add a link to the image URL.
-	alt := string(n.Text(source))
+	var alt string
+	for child := n.FirstChild(); child != nil; child = child.NextSibling() {
+		if t, ok := child.(*ast.Text); ok {
+			alt += string(t.Value(source))
+		}
+	}
 	if alt == "" {
 		alt = "image"
 	}
