@@ -19,6 +19,8 @@ type Dir struct {
 	cache   *Cache
 	path    string
 	entry   *Entry
+	uid     uint32
+	gid     uint32
 }
 
 // compile-time interface checks
@@ -89,9 +91,11 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 		cache:   d.cache,
 		path:    childPath,
 		entry:   entry,
+		uid:     d.uid,
+		gid:     d.gid,
 	}
 
-	fillAttrOut(entry, &out.Attr)
+	fillAttrOut(entry, &out.Attr, d.uid, d.gid)
 
 	child := d.NewInode(ctx, f, fs.StableAttr{})
 	return child, nil, 0, fs.OK
@@ -149,13 +153,15 @@ func (d *Dir) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.Ent
 
 	d.cache.Invalidate(d.path)
 
-	fillAttrOut(entry, &out.Attr)
+	fillAttrOut(entry, &out.Attr, d.uid, d.gid)
 
 	child := d.NewInode(ctx, &Dir{
 		handler: d.handler,
 		cache:   d.cache,
 		path:    childPath,
 		entry:   entry,
+		uid:     d.uid,
+		gid:     d.gid,
 	}, fs.StableAttr{Mode: syscall.S_IFDIR})
 	return child, fs.OK
 }
@@ -163,6 +169,8 @@ func (d *Dir) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.Ent
 // Getattr returns attributes for this directory.
 func (d *Dir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = syscall.S_IFDIR | 0o755
+	out.Uid = d.uid
+	out.Gid = d.gid
 	if d.entry != nil {
 		out.Mtime = uint64(d.entry.ModTime.Unix())
 		out.Size = d.entry.Size
@@ -174,7 +182,7 @@ func (d *Dir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) 
 
 // childInode creates or retrieves a child inode for the given entry.
 func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *fuse.EntryOut) *fs.Inode {
-	fillAttrOut(e, &out.Attr)
+	fillAttrOut(e, &out.Attr, d.uid, d.gid)
 
 	if e.IsDir {
 		return d.NewInode(ctx, &Dir{
@@ -182,6 +190,8 @@ func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *f
 			cache:   d.cache,
 			path:    childPath,
 			entry:   e,
+			uid:     d.uid,
+			gid:     d.gid,
 		}, fs.StableAttr{Mode: syscall.S_IFDIR})
 	}
 	return d.NewInode(ctx, &File{
@@ -189,6 +199,8 @@ func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *f
 		cache:   d.cache,
 		path:    childPath,
 		entry:   e,
+		uid:     d.uid,
+		gid:     d.gid,
 	}, fs.StableAttr{})
 }
 
@@ -201,6 +213,8 @@ type File struct {
 	path    string
 	entry   *Entry
 	mu      sync.Mutex
+	uid     uint32
+	gid     uint32
 }
 
 // compile-time interface checks
@@ -216,9 +230,11 @@ var (
 // Getattr returns file attributes.
 func (f *File) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	if f.entry != nil {
-		fillAttrOut(f.entry, &out.Attr)
+		fillAttrOut(f.entry, &out.Attr, f.uid, f.gid)
 	} else {
-		out.Mode = 0o644
+		out.Mode = 0o444
+		out.Uid = f.uid
+		out.Gid = f.gid
 		out.Mtime = uint64(time.Now().Unix())
 	}
 	return fs.OK
@@ -242,7 +258,7 @@ func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 	}
 
 	if f.entry != nil {
-		fillAttrOut(f.entry, &out.Attr)
+		fillAttrOut(f.entry, &out.Attr, f.uid, f.gid)
 	}
 	return fs.OK
 }
