@@ -21,13 +21,13 @@ See `Design.md` for full architecture, handler interface, and phased MVP scope.
 
 ## Success Criteria
 
-- [x] Users can authenticate with Google Drive via OAuth and have tokens stored securely in their config directory
-- [x] A Google Drive folder can be mounted as a local filesystem directory using `gdocs-md mount`
-- [x] Google Docs appear as `.md` files and their content is readable as markdown
-- [x] Editing and saving a `.md` file updates the corresponding Google Doc in Drive
-- [x] Deleting a mounted file removes the corresponding document from Google Drive
-- [x] Files can be moved or renamed within the mounted filesystem
-- [x] Repeated reads of the same document are served from cache with latency under 200ms
-- [x] Round-trip markdown conversion preserves at least 95% of document formatting
-- [x] PDFs and images are accessible as pass-through files without modification
-- [x] No data loss occurs during read/write/sync operations
+- [ ] Users can authenticate with Google Drive via OAuth and have tokens stored securely in their config directory
+- [ ] A Google Drive folder can be mounted as a local filesystem directory using `gdocs-md mount`
+- [ ] Google Docs appear as `.md` files and their content is readable as markdown
+- [ ] Editing and saving a `.md` file updates the corresponding Google Doc in Drive
+- [ ] Deleting a mounted file removes the corresponding document from Google Drive
+- [ ] Files can be moved or renamed within the mounted filesystem
+- [ ] Repeated reads of the same document are served from cache with latency under 200ms
+- [ ] Round-trip markdown conversion preserves at least 95% of document formatting
+- [ ] PDFs and images are accessible as pass-through files without modification
+- [ ] No data loss occurs during read/write/sync operations
