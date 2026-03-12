@@ -115,6 +115,14 @@ func NewOAuthConfig(credentialsPath string) (*OAuthConfig, error) {
 	}, nil
 }
 
+// SetRedirectURL overrides the redirect URL from the credentials file. This is
+// used to redirect to a local loopback server instead of whatever URL was
+// configured in the Google Cloud Console credentials.
+func (oc *OAuthConfig) SetRedirectURL(url string) {
+	oc.RedirectURL = url
+	oc.cfg.RedirectURL = url
+}
+
 // GetAuthURL returns the URL the user must visit to authorize the application.
 func (oc *OAuthConfig) GetAuthURL() string {
 	return oc.cfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
