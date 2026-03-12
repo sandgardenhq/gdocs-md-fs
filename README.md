@@ -10,7 +10,7 @@ gdocs-md uses [FUSE](https://en.wikipedia.org/wiki/Filesystem_in_Userspace) to p
 
 ```mermaid
 flowchart LR
-    A["Local editor\n(vim, VS Code)"] <--> B["FUSE filesystem\n(gdocs-md mount)"] <--> C["Google Drive\n+ Docs API"]
+    A["Local editor<br/>(vim, VS Code)"] <--> B["FUSE filesystem<br/>(gdocs-md mount)"] <--> C["Google Drive<br/>+ Docs API"]
 ```
 
 ### File type mapping
