@@ -16,6 +16,8 @@ type Server struct {
 	mountpoint string
 	server     *fuse.Server
 	readOnly   bool
+	uid        uint32
+	gid        uint32
 }
 
 // ServerOption configures a Server.
@@ -40,6 +42,8 @@ func NewServer(handler Handler, mountpoint string, opts ...ServerOption) *Server
 	s := &Server{
 		handler:    handler,
 		mountpoint: mountpoint,
+		uid:        uint32(os.Getuid()),
+		gid:        uint32(os.Getgid()),
 	}
 	for _, o := range opts {
 		o(s)
@@ -68,6 +72,8 @@ func (s *Server) Mount() error {
 			Mode:    os.ModeDir | 0o755,
 			ModTime: time.Now(),
 		},
+		uid: s.uid,
+		gid: s.gid,
 	}
 
 	timeout := time.Second
