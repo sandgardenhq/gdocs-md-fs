@@ -83,7 +83,7 @@ func (s *Server) Mount() error {
 	}
 
 	if s.readOnly {
-		opts.MountOptions.Options = append(opts.MountOptions.Options, "ro")
+		opts.Options = append(opts.Options, "ro")
 	}
 
 	server, err := fs.Mount(s.mountpoint, root, opts)

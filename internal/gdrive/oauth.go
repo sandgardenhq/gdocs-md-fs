@@ -88,19 +88,6 @@ func (ts *TokenStore) LoadToken() (*oauth2.Token, error) {
 	return &token, nil
 }
 
-// credentialsFile is the expected JSON structure of the client credentials file
-// downloaded from the Google Cloud console.
-type credentialsFile struct {
-	Installed *credentialsInstalled `json:"installed"`
-	Web       *credentialsInstalled `json:"web"`
-}
-
-type credentialsInstalled struct {
-	ClientID     string   `json:"client_id"`
-	ClientSecret string   `json:"client_secret"`
-	RedirectURIs []string `json:"redirect_uris"`
-}
-
 // NewOAuthConfig loads client credentials from a JSON file (typically
 // configDir()/credentials.json) and returns an OAuthConfig ready for the
 // authorization flow. If credentialsPath is empty, the default location

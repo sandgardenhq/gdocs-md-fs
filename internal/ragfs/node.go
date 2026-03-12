@@ -19,7 +19,6 @@ type Dir struct {
 	cache   *Cache
 	path    string
 	entry   *Entry
-	mu      sync.Mutex
 }
 
 // compile-time interface checks
