@@ -320,15 +320,29 @@ func (f *File) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int
 	return uint32(len(data)), fs.OK
 }
 
+// mimeGoogleDoc is the MIME type for Google Docs, defined here to avoid
+// importing the gdrive package.
+const mimeGoogleDoc = "application/vnd.google-apps.document"
+
+// isWritableFile reports whether a file with the given MIME type should be
+// writable (i.e., it's a Google Doc presented as markdown).
+func isWritableFile(mimeType string) bool {
+	return mimeType == mimeGoogleDoc
+}
+
 // fillAttrOut populates a fuse.Attr from an Entry.
-func fillAttrOut(e *Entry, a *fuse.Attr) {
+func fillAttrOut(e *Entry, a *fuse.Attr, uid, gid uint32) {
 	if e == nil {
 		return
 	}
+	a.Uid = uid
+	a.Gid = gid
 	if e.IsDir {
 		a.Mode = syscall.S_IFDIR | 0o755
-	} else {
+	} else if isWritableFile(e.MimeType) {
 		a.Mode = 0o644
+	} else {
+		a.Mode = 0o444
 	}
 	a.Size = e.Size
 	a.Mtime = uint64(e.ModTime.Unix())
@@ -343,9 +357,13 @@ type dirStream struct {
 func newDirStream(entries []Entry) *dirStream {
 	dirents := make([]fuse.DirEntry, len(entries))
 	for i, e := range entries {
-		mode := uint32(0o644)
+		var mode uint32
 		if e.IsDir {
 			mode = syscall.S_IFDIR | 0o755
+		} else if isWritableFile(e.MimeType) {
+			mode = 0o644
+		} else {
+			mode = 0o444
 		}
 		dirents[i] = fuse.DirEntry{
 			Name: e.Name,
