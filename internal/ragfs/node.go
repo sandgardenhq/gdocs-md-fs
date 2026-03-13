@@ -98,7 +98,7 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 	fillAttrOut(entry, &out.Attr, d.uid, d.gid)
 
 	child := d.NewInode(ctx, f, fs.StableAttr{Mode: syscall.S_IFREG})
-	return child, nil, 0, fs.OK
+	return child, nil, fuse.FOPEN_DIRECT_IO, fs.OK
 }
 
 // Unlink deletes a file from this directory.
@@ -266,7 +266,20 @@ func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 // Open opens the file for reading or writing. FOPEN_DIRECT_IO bypasses the
 // kernel page cache, which is required because Google Docs report Size=0 and
 // the kernel would otherwise short-circuit reads and miscalculate write offsets.
+//
+// O_TRUNC is handled here because some FUSE implementations (notably macOS)
+// may not send a separate SETATTR for truncation after OPEN.
 func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	if flags&syscall.O_TRUNC != 0 {
+		if err := f.handler.Write(ctx, f.path, nil); err != nil {
+			return nil, 0, syscall.EIO
+		}
+		f.cache.Invalidate(f.path)
+		if f.entry != nil {
+			f.entry.Size = 0
+			f.entry.ModTime = time.Now()
+		}
+	}
 	return nil, fuse.FOPEN_DIRECT_IO, fs.OK
 }
 
@@ -335,7 +348,10 @@ func (f *File) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int
 		return 0, syscall.EIO
 	}
 
-	f.cache.Invalidate(f.path)
+	// Update the cache with the written content so subsequent reads
+	// serve from cache rather than re-fetching from Google, which
+	// avoids stale data between the truncation and write steps.
+	f.cache.PutContent(f.path, current)
 
 	if f.entry != nil {
 		f.entry.Size = uint64(len(current))
