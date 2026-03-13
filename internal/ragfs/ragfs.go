@@ -2,6 +2,7 @@ package ragfs
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -18,6 +19,7 @@ type Server struct {
 	readOnly   bool
 	uid        uint32
 	gid        uint32
+	logger     *log.Logger
 }
 
 // ServerOption configures a Server.
@@ -51,6 +53,9 @@ func NewServer(handler Handler, mountpoint string, opts ...ServerOption) *Server
 	if s.cache == nil {
 		s.cache = NewCache()
 	}
+	if s.logger == nil {
+		s.logger = log.New(os.Stderr, "ragfs: ", log.LstdFlags)
+	}
 	return s
 }
 
@@ -72,8 +77,9 @@ func (s *Server) Mount() error {
 			Mode:    os.ModeDir | 0o755,
 			ModTime: time.Now(),
 		},
-		uid: s.uid,
-		gid: s.gid,
+		uid:    s.uid,
+		gid:    s.gid,
+		logger: s.logger,
 	}
 
 	timeout := time.Second

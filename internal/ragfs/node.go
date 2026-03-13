@@ -2,6 +2,7 @@ package ragfs
 
 import (
 	"context"
+	"log"
 	"path"
 	"sync"
 	"syscall"
@@ -21,6 +22,7 @@ type Dir struct {
 	entry   *Entry
 	uid     uint32
 	gid     uint32
+	logger  *log.Logger
 }
 
 // compile-time interface checks
@@ -93,6 +95,7 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 		entry:   entry,
 		uid:     d.uid,
 		gid:     d.gid,
+		logger:  d.logger,
 	}
 
 	fillAttrOut(entry, &out.Attr, d.uid, d.gid)
@@ -162,6 +165,7 @@ func (d *Dir) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.Ent
 		entry:   entry,
 		uid:     d.uid,
 		gid:     d.gid,
+		logger:  d.logger,
 	}, fs.StableAttr{Mode: syscall.S_IFDIR})
 	return child, fs.OK
 }
@@ -192,6 +196,7 @@ func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *f
 			entry:   e,
 			uid:     d.uid,
 			gid:     d.gid,
+			logger:  d.logger,
 		}, fs.StableAttr{Mode: syscall.S_IFDIR})
 	}
 	return d.NewInode(ctx, &File{
@@ -201,6 +206,7 @@ func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *f
 		entry:   e,
 		uid:     d.uid,
 		gid:     d.gid,
+		logger:  d.logger,
 	}, fs.StableAttr{Mode: syscall.S_IFREG})
 }
 
@@ -216,6 +222,7 @@ type File struct {
 	uid     uint32
 	gid     uint32
 	dirty   bool // true when content has been modified and needs flushing
+	logger  *log.Logger
 }
 
 // compile-time interface checks
@@ -374,6 +381,9 @@ func (f *File) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 	}
 
 	if err := f.handler.Write(ctx, f.path, content); err != nil {
+		if f.logger != nil {
+			f.logger.Printf("flush %q: %v", f.path, err)
+		}
 		return syscall.EIO
 	}
 

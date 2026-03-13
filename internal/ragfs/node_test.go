@@ -1,8 +1,10 @@
 package ragfs
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"syscall"
 	"testing"
 	"time"
@@ -499,6 +501,37 @@ func TestFileWrite_DoesNotCallHandler(t *testing.T) {
 	cached := cache.GetContent("doc.md")
 	if string(cached) != string(data) {
 		t.Errorf("cached content: got %q, want %q", cached, data)
+	}
+}
+
+func TestFileFlush_LogsErrorOnHandlerFailure(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	h := &stubHandler{readContent: []byte{}, writeErr: fmt.Errorf("api: 403 forbidden")}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+		logger:  logger,
+	}
+
+	// Write data so file becomes dirty.
+	f.Write(context.Background(), nil, []byte("# Content\n"), 0)
+
+	// Flush should fail and log the error.
+	errno := f.Flush(context.Background(), nil)
+	if errno != syscall.EIO {
+		t.Fatalf("Flush errno: got %d, want EIO", errno)
+	}
+
+	logOutput := buf.String()
+	if !bytes.Contains([]byte(logOutput), []byte("doc.md")) {
+		t.Errorf("log should contain file path, got: %q", logOutput)
+	}
+	if !bytes.Contains([]byte(logOutput), []byte("403 forbidden")) {
+		t.Errorf("log should contain error message, got: %q", logOutput)
 	}
 }
 
