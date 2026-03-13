@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 )
@@ -13,7 +14,6 @@ func TestLoopbackServer_CapturesAuthCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLoopbackServer() error: %v", err)
 	}
-	defer srv.Close()
 
 	// The server should provide a redirect URL with port.
 	redirectURL := srv.RedirectURL()
@@ -22,10 +22,13 @@ func TestLoopbackServer_CapturesAuthCode(t *testing.T) {
 	}
 
 	// Simulate Google redirecting with an auth code.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		resp, err := http.Get(redirectURL + "?code=test-auth-code-123&state=state-token")
 		if err != nil {
-			t.Errorf("GET callback: %v", err)
+			// Server may close before response completes; not a test failure.
 			return
 		}
 		_ = resp.Body.Close()
@@ -41,6 +44,9 @@ func TestLoopbackServer_CapturesAuthCode(t *testing.T) {
 	if code != "test-auth-code-123" {
 		t.Errorf("WaitForCode() = %q, want %q", code, "test-auth-code-123")
 	}
+
+	srv.Close()
+	wg.Wait()
 }
 
 func TestLoopbackServer_ReturnsErrorOnMissingCode(t *testing.T) {
@@ -48,13 +54,15 @@ func TestLoopbackServer_ReturnsErrorOnMissingCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLoopbackServer() error: %v", err)
 	}
-	defer srv.Close()
 
 	// Simulate redirect with an error instead of a code.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		resp, err := http.Get(srv.RedirectURL() + "?error=access_denied")
 		if err != nil {
-			t.Errorf("GET callback: %v", err)
+			// Server may close before response completes; not a test failure.
 			return
 		}
 		_ = resp.Body.Close()
@@ -67,6 +75,9 @@ func TestLoopbackServer_ReturnsErrorOnMissingCode(t *testing.T) {
 	if err == nil {
 		t.Fatal("WaitForCode() expected error for error response, got nil")
 	}
+
+	srv.Close()
+	wg.Wait()
 }
 
 func TestLoopbackServer_TimesOutWhenNoCallback(t *testing.T) {
