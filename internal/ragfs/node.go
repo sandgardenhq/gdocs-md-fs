@@ -2,6 +2,7 @@ package ragfs
 
 import (
 	"context"
+	"log"
 	"path"
 	"sync"
 	"syscall"
@@ -21,6 +22,8 @@ type Dir struct {
 	entry   *Entry
 	uid     uint32
 	gid     uint32
+	server  *Server
+	logger  *log.Logger
 }
 
 // compile-time interface checks
@@ -93,6 +96,8 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 		entry:   entry,
 		uid:     d.uid,
 		gid:     d.gid,
+		server:  d.server,
+		logger:  d.logger,
 	}
 
 	fillAttrOut(entry, &out.Attr, d.uid, d.gid)
@@ -162,6 +167,8 @@ func (d *Dir) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.Ent
 		entry:   entry,
 		uid:     d.uid,
 		gid:     d.gid,
+		server:  d.server,
+		logger:  d.logger,
 	}, fs.StableAttr{Mode: syscall.S_IFDIR})
 	return child, fs.OK
 }
@@ -192,6 +199,8 @@ func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *f
 			entry:   e,
 			uid:     d.uid,
 			gid:     d.gid,
+			server:  d.server,
+			logger:  d.logger,
 		}, fs.StableAttr{Mode: syscall.S_IFDIR})
 	}
 	return d.NewInode(ctx, &File{
@@ -201,6 +210,8 @@ func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *f
 		entry:   e,
 		uid:     d.uid,
 		gid:     d.gid,
+		server:  d.server,
+		logger:  d.logger,
 	}, fs.StableAttr{Mode: syscall.S_IFREG})
 }
 
@@ -215,7 +226,10 @@ type File struct {
 	mu      sync.Mutex
 	uid     uint32
 	gid     uint32
-	dirty   bool // true when content has been modified and needs flushing
+	dirty       bool    // true when content has been modified and needs flushing
+	pendingData []byte  // buffered content that survives cache TTL/eviction
+	server      *Server // parent server for dirty file registration
+	logger      *log.Logger
 }
 
 // compile-time interface checks
@@ -247,7 +261,11 @@ func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 	if sz, ok := in.GetSize(); ok {
 		if sz == 0 {
 			f.cache.PutContent(f.path, []byte{})
+			f.pendingData = []byte{}
 			f.dirty = true
+			if f.server != nil {
+				f.server.registerDirty(f)
+			}
 			if f.entry != nil {
 				f.entry.Size = 0
 				f.entry.ModTime = time.Now()
@@ -272,7 +290,11 @@ func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if flags&syscall.O_TRUNC != 0 {
 		f.cache.PutContent(f.path, []byte{})
+		f.pendingData = []byte{}
 		f.dirty = true
+		if f.server != nil {
+			f.server.registerDirty(f)
+		}
 		if f.entry != nil {
 			f.entry.Size = 0
 			f.entry.ModTime = time.Now()
@@ -347,7 +369,12 @@ func (f *File) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int
 	// Persistence to the backend is deferred to Flush.
 	f.cache.PutContent(f.path, current)
 
+	f.pendingData = make([]byte, len(current))
+	copy(f.pendingData, current)
 	f.dirty = true
+	if f.server != nil {
+		f.server.registerDirty(f)
+	}
 
 	if f.entry != nil {
 		f.entry.Size = uint64(len(current))
@@ -364,20 +391,41 @@ func (f *File) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	return f.persistLocked(ctx)
+}
+
+// persistIfDirty persists dirty content to the backend. It acquires the mutex
+// internally and is safe to call from the sync loop goroutine.
+func (f *File) persistIfDirty(ctx context.Context) syscall.Errno {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.persistLocked(ctx)
+}
+
+// persistLocked does the actual persist work. Caller must hold f.mu.
+func (f *File) persistLocked(ctx context.Context) syscall.Errno {
 	if !f.dirty {
 		return fs.OK
 	}
 
-	content := f.cache.GetContent(f.path)
+	content := f.pendingData
 	if content == nil {
 		content = []byte{}
 	}
 
 	if err := f.handler.Write(ctx, f.path, content); err != nil {
+		if f.logger != nil {
+			f.logger.Printf("flush %q: %v", f.path, err)
+		}
 		return syscall.EIO
 	}
 
+	f.pendingData = nil
 	f.dirty = false
+	if f.server != nil {
+		f.server.unregisterDirty(f)
+	}
 	return fs.OK
 }
 
