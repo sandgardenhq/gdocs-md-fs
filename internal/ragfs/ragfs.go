@@ -1,9 +1,11 @@
 package ragfs
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -12,14 +14,18 @@ import (
 
 // Server manages the FUSE mount lifecycle for a ragfs filesystem.
 type Server struct {
-	handler    Handler
-	cache      *Cache
-	mountpoint string
-	server     *fuse.Server
-	readOnly   bool
-	uid        uint32
-	gid        uint32
-	logger     *log.Logger
+	handler      Handler
+	cache        *Cache
+	mountpoint   string
+	server       *fuse.Server
+	readOnly     bool
+	uid          uint32
+	gid          uint32
+	logger       *log.Logger
+	syncInterval time.Duration
+	dirtyMu      sync.Mutex
+	dirtyFiles   map[*File]struct{}
+	stopSync     chan struct{}
 }
 
 // ServerOption configures a Server.
@@ -39,13 +45,23 @@ func WithReadOnly(readOnly bool) ServerOption {
 	}
 }
 
+// WithSyncInterval returns a ServerOption that sets the periodic sync interval.
+func WithSyncInterval(d time.Duration) ServerOption {
+	return func(s *Server) {
+		s.syncInterval = d
+	}
+}
+
 // NewServer creates a new FUSE server for the given handler and mountpoint.
 func NewServer(handler Handler, mountpoint string, opts ...ServerOption) *Server {
 	s := &Server{
-		handler:    handler,
-		mountpoint: mountpoint,
-		uid:        uint32(os.Getuid()),
-		gid:        uint32(os.Getgid()),
+		handler:      handler,
+		mountpoint:   mountpoint,
+		uid:          uint32(os.Getuid()),
+		gid:          uint32(os.Getgid()),
+		syncInterval: time.Second,
+		dirtyFiles:   make(map[*File]struct{}),
+		stopSync:     make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(s)
@@ -79,6 +95,7 @@ func (s *Server) Mount() error {
 		},
 		uid:    s.uid,
 		gid:    s.gid,
+		server: s,
 		logger: s.logger,
 	}
 
@@ -104,10 +121,58 @@ func (s *Server) Mount() error {
 	}
 	s.server = server
 
+	// Start periodic sync of dirty files.
+	go s.syncLoop()
+
 	// Serve blocks until unmount.
 	server.Wait()
 
 	return nil
+}
+
+// registerDirty adds a file to the set of dirty files that the sync loop
+// will periodically flush.
+func (s *Server) registerDirty(f *File) {
+	s.dirtyMu.Lock()
+	defer s.dirtyMu.Unlock()
+	s.dirtyFiles[f] = struct{}{}
+}
+
+// unregisterDirty removes a file from the dirty set.
+func (s *Server) unregisterDirty(f *File) {
+	s.dirtyMu.Lock()
+	defer s.dirtyMu.Unlock()
+	delete(s.dirtyFiles, f)
+}
+
+// syncLoop runs in a goroutine and periodically flushes dirty files.
+func (s *Server) syncLoop() {
+	ticker := time.NewTicker(s.syncInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopSync:
+			s.flushAllDirty()
+			return
+		case <-ticker.C:
+			s.flushAllDirty()
+		}
+	}
+}
+
+// flushAllDirty persists all dirty files to the backend.
+func (s *Server) flushAllDirty() {
+	s.dirtyMu.Lock()
+	files := make([]*File, 0, len(s.dirtyFiles))
+	for f := range s.dirtyFiles {
+		files = append(files, f)
+	}
+	s.dirtyMu.Unlock()
+
+	for _, f := range files {
+		_ = f.persistIfDirty(context.Background())
+	}
 }
 
 // Unmount cleanly unmounts the FUSE filesystem.
@@ -115,5 +180,6 @@ func (s *Server) Unmount() error {
 	if s.server == nil {
 		return nil
 	}
+	close(s.stopSync)
 	return s.server.Unmount()
 }

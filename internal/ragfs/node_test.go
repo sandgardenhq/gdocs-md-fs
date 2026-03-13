@@ -518,7 +518,7 @@ func TestFileFlush_LogsErrorOnHandlerFailure(t *testing.T) {
 	}
 
 	// Write data so file becomes dirty.
-	f.Write(context.Background(), nil, []byte("# Content\n"), 0)
+	_, _ = f.Write(context.Background(), nil, []byte("# Content\n"), 0)
 
 	// Flush should fail and log the error.
 	errno := f.Flush(context.Background(), nil)
@@ -532,6 +532,211 @@ func TestFileFlush_LogsErrorOnHandlerFailure(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(logOutput), []byte("403 forbidden")) {
 		t.Errorf("log should contain error message, got: %q", logOutput)
+	}
+}
+
+func TestFileFlush_PersistsContentAfterCacheTTLExpires(t *testing.T) {
+	h := &stubHandler{readContent: []byte{}}
+	cache := NewCache(WithContentTTL(1 * time.Millisecond))
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	_, _, _ = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_TRUNC))
+	data := []byte("# Important data\n")
+	_, _ = f.Write(context.Background(), nil, data, 0)
+
+	time.Sleep(5 * time.Millisecond)
+
+	// Confirm cache is expired.
+	if cache.GetContent("doc.md") != nil {
+		t.Fatal("expected cache to be expired")
+	}
+
+	h.writeCalled = false
+	h.lastWritten = nil
+	errno := f.Flush(context.Background(), nil)
+	if errno != 0 {
+		t.Fatalf("Flush returned errno %d", errno)
+	}
+	if !h.writeCalled {
+		t.Error("Flush must call handler.Write even after cache expires")
+	}
+	if string(h.lastWritten) != string(data) {
+		t.Errorf("Flush wrote %q, want %q", h.lastWritten, data)
+	}
+}
+
+func TestFileFlush_PersistsContentAfterCacheEviction(t *testing.T) {
+	h := &stubHandler{readContent: []byte{}}
+	cache := NewCache(WithMaxSize(10))
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	_, _, _ = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_TRUNC))
+	data := []byte("# This content is longer than 10 bytes\n")
+	_, _ = f.Write(context.Background(), nil, data, 0)
+
+	// Evict by writing a large entry for another file.
+	cache.PutContent("other.md", []byte("# Other content that causes eviction\n"))
+
+	if cache.GetContent("doc.md") != nil {
+		t.Fatal("expected doc.md to be evicted from cache")
+	}
+
+	h.writeCalled = false
+	h.lastWritten = nil
+	errno := f.Flush(context.Background(), nil)
+	if errno != 0 {
+		t.Fatalf("Flush returned errno %d", errno)
+	}
+	if !h.writeCalled {
+		t.Error("Flush must call handler.Write even after cache eviction")
+	}
+	if string(h.lastWritten) != string(data) {
+		t.Errorf("Flush wrote %q, want %q", h.lastWritten, data)
+	}
+}
+
+func TestFileFlush_RetainsPendingDataOnError(t *testing.T) {
+	h := &stubHandler{readContent: []byte{}, writeErr: fmt.Errorf("network error")}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	_, _, _ = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_TRUNC))
+	data := []byte("# Important\n")
+	_, _ = f.Write(context.Background(), nil, data, 0)
+
+	errno := f.Flush(context.Background(), nil)
+	if errno != syscall.EIO {
+		t.Fatalf("Flush errno: got %d, want EIO", errno)
+	}
+
+	if f.pendingData == nil {
+		t.Error("pendingData must be retained after failed Flush")
+	}
+	if string(f.pendingData) != string(data) {
+		t.Errorf("pendingData after failed Flush: got %q, want %q", f.pendingData, data)
+	}
+	if !f.dirty {
+		t.Error("dirty must remain true after failed Flush")
+	}
+}
+
+func TestFileFlush_ClearsPendingDataAfterSuccess(t *testing.T) {
+	h := &stubHandler{readContent: []byte{}}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	_, _, _ = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_TRUNC))
+	_, _ = f.Write(context.Background(), nil, []byte("# Content\n"), 0)
+	_ = f.Flush(context.Background(), nil)
+
+	if f.pendingData != nil {
+		t.Errorf("pendingData after Flush: got %v, want nil", f.pendingData)
+	}
+	if f.dirty {
+		t.Error("dirty after Flush: got true, want false")
+	}
+}
+
+func TestFileOpen_TruncSetsEmptyPendingData(t *testing.T) {
+	f := &File{
+		cache: NewCache(),
+		path:  "doc.md",
+		entry: &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: 100},
+	}
+	_, _, _ = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_TRUNC))
+	if f.pendingData == nil {
+		t.Fatal("pendingData must be non-nil after O_TRUNC")
+	}
+	if len(f.pendingData) != 0 {
+		t.Errorf("pendingData after O_TRUNC: got %d bytes, want 0", len(f.pendingData))
+	}
+}
+
+func TestFileSetattr_TruncSetsEmptyPendingData(t *testing.T) {
+	f := &File{
+		cache: NewCache(),
+		path:  "doc.md",
+		entry: &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: 100},
+	}
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 0
+	var out fuse.AttrOut
+	_ = f.Setattr(context.Background(), nil, in, &out)
+	if f.pendingData == nil {
+		t.Fatal("pendingData must be non-nil after Setattr size=0")
+	}
+	if len(f.pendingData) != 0 {
+		t.Errorf("pendingData after Setattr size=0: got %d bytes, want 0", len(f.pendingData))
+	}
+}
+
+func TestFile_PersistIfDirty_SendsContentToHandler(t *testing.T) {
+	h := &stubHandler{readContent: []byte{}}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	_, _ = f.Write(context.Background(), nil, []byte("# Direct persist\n"), 0)
+
+	h.writeCalled = false
+	h.lastWritten = nil
+	errno := f.persistIfDirty(context.Background())
+	if errno != 0 {
+		t.Fatalf("persistIfDirty returned errno %d", errno)
+	}
+	if !h.writeCalled {
+		t.Error("persistIfDirty must call handler.Write")
+	}
+	if string(h.lastWritten) != "# Direct persist\n" {
+		t.Errorf("persistIfDirty wrote %q, want %q", h.lastWritten, "# Direct persist\n")
+	}
+	if f.dirty {
+		t.Error("dirty should be false after successful persistIfDirty")
+	}
+	if f.pendingData != nil {
+		t.Error("pendingData should be nil after successful persistIfDirty")
+	}
+}
+
+func TestFile_PersistIfDirty_SkipsCleanFile(t *testing.T) {
+	h := &stubHandler{readContent: []byte{}}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+	}
+
+	errno := f.persistIfDirty(context.Background())
+	if errno != 0 {
+		t.Fatalf("persistIfDirty returned errno %d", errno)
+	}
+	if h.writeCalled {
+		t.Error("persistIfDirty must not call handler.Write for clean file")
 	}
 }
 
