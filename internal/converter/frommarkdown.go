@@ -14,12 +14,11 @@ import (
 )
 
 // FromMarkdown parses Markdown content and returns a slice of Google Docs API
-// batchUpdate Request objects that, when applied, reproduce the Markdown content
-// in a Google Doc.
+// batchUpdate Request objects that insert text and apply formatting starting at
+// document index 1.
 //
-// The returned requests should be applied in order. The first request clears the
-// document body (deletes from index 1 to end), and subsequent requests insert
-// text and apply formatting.
+// The caller is responsible for clearing existing document content before
+// applying these requests (see gdrive.buildWriteRequests).
 func FromMarkdown(md []byte) ([]*docs.Request, error) {
 	gm := goldmark.New(goldmark.WithExtensions(extension.Strikethrough))
 	reader := text.NewReader(md)

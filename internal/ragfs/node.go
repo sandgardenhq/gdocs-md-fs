@@ -97,7 +97,7 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 
 	fillAttrOut(entry, &out.Attr, d.uid, d.gid)
 
-	child := d.NewInode(ctx, f, fs.StableAttr{})
+	child := d.NewInode(ctx, f, fs.StableAttr{Mode: syscall.S_IFREG})
 	return child, nil, 0, fs.OK
 }
 
@@ -201,7 +201,7 @@ func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *f
 		entry:   e,
 		uid:     d.uid,
 		gid:     d.gid,
-	}, fs.StableAttr{})
+	}, fs.StableAttr{Mode: syscall.S_IFREG})
 }
 
 // File implements a FUSE file node backed by a Handler and Cache.
@@ -232,7 +232,7 @@ func (f *File) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut)
 	if f.entry != nil {
 		fillAttrOut(f.entry, &out.Attr, f.uid, f.gid)
 	} else {
-		out.Mode = 0o444
+		out.Mode = syscall.S_IFREG | 0o444
 		out.Uid = f.uid
 		out.Gid = f.gid
 		out.Mtime = uint64(time.Now().Unix())
@@ -263,9 +263,11 @@ func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 	return fs.OK
 }
 
-// Open opens the file for reading or writing.
+// Open opens the file for reading or writing. FOPEN_DIRECT_IO bypasses the
+// kernel page cache, which is required because Google Docs report Size=0 and
+// the kernel would otherwise short-circuit reads and miscalculate write offsets.
 func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	return nil, 0, fs.OK
+	return nil, fuse.FOPEN_DIRECT_IO, fs.OK
 }
 
 // Read reads file content at the given offset. Results are cached.
@@ -281,6 +283,13 @@ func (f *File) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int6
 		}
 		data = content
 		f.cache.PutContent(f.path, data)
+	}
+
+	// Update entry size to reflect actual content length. Google Docs
+	// report Size=0 from the Drive API; without this the kernel uses
+	// the wrong offset for O_APPEND writes.
+	if f.entry != nil && len(data) > 0 {
+		f.entry.Size = uint64(len(data))
 	}
 
 	end := int(off) + len(dest)
@@ -356,9 +365,9 @@ func fillAttrOut(e *Entry, a *fuse.Attr, uid, gid uint32) {
 	if e.IsDir {
 		a.Mode = syscall.S_IFDIR | 0o755
 	} else if isWritableFile(e.MimeType) {
-		a.Mode = 0o644
+		a.Mode = syscall.S_IFREG | 0o644
 	} else {
-		a.Mode = 0o444
+		a.Mode = syscall.S_IFREG | 0o444
 	}
 	a.Size = e.Size
 	a.Mtime = uint64(e.ModTime.Unix())
@@ -377,9 +386,9 @@ func newDirStream(entries []Entry) *dirStream {
 		if e.IsDir {
 			mode = syscall.S_IFDIR | 0o755
 		} else if isWritableFile(e.MimeType) {
-			mode = 0o644
+			mode = syscall.S_IFREG | 0o644
 		} else {
-			mode = 0o444
+			mode = syscall.S_IFREG | 0o444
 		}
 		dirents[i] = fuse.DirEntry{
 			Name: e.Name,

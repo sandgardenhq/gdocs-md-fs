@@ -93,8 +93,9 @@ func (h *DriveHandler) Read(ctx context.Context, filePath string) ([]byte, error
 	return h.client.DownloadFile(ctx, pe.fileID)
 }
 
-// Write writes data to a file. For Google Docs (.md files), markdown is
-// converted to Doc API requests. Other file types are not currently supported.
+// Write writes data to a file. For Google Docs (.md files), the existing
+// document body is cleared and replaced with the markdown content converted to
+// Docs API requests. Other file types are not currently supported.
 func (h *DriveHandler) Write(ctx context.Context, filePath string, data []byte) error {
 	pe, err := h.resolvePathEntry(ctx, filePath)
 	if err != nil {
@@ -102,7 +103,16 @@ func (h *DriveHandler) Write(ctx context.Context, filePath string, data []byte) 
 	}
 
 	if pe.mimeType == MimeDoc {
-		requests, err := markdownToDocRequests(data)
+		// Fetch the document to determine the body's end index so we
+		// can clear existing content before inserting new content.
+		doc, err := h.client.GetDoc(ctx, pe.fileID)
+		if err != nil {
+			return fmt.Errorf("gdrive: write %q: get doc: %w", filePath, err)
+		}
+
+		endIndex := docBodyEndIndex(doc)
+
+		requests, err := buildWriteRequests(endIndex, data)
 		if err != nil {
 			return err
 		}
