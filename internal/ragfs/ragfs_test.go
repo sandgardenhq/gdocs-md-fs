@@ -223,6 +223,60 @@ func TestFileFlush_UnregistersDirtyFromServer(t *testing.T) {
 	}
 }
 
+func TestServer_UnmountWaitsForFinalFlush(t *testing.T) {
+	h := &syncSafeHandler{readContent: []byte{}}
+	s := NewServer(h, "/tmp/test-mount", WithSyncInterval(time.Hour))
+	// Don't call Mount; manually start the sync loop.
+	go s.syncLoop()
+
+	f := &File{
+		handler: h,
+		cache:   s.cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+		server:  s,
+	}
+
+	_, _ = f.Write(context.Background(), nil, []byte("# Final flush\n"), 0)
+	s.registerDirty(f)
+
+	// Unmount (without a real FUSE server, so set s.server = nil to skip
+	// the actual FUSE unmount). The sync loop final flush must still run.
+	s.server = nil
+	err := s.Unmount()
+	if err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+
+	// After Unmount returns, the final flush must have completed.
+	h.mu.Lock()
+	called := h.writeCalled
+	written := string(h.lastWritten)
+	h.mu.Unlock()
+
+	if !called {
+		t.Error("Unmount must wait for syncLoop to flush dirty files before returning")
+	}
+	if written != "# Final flush\n" {
+		t.Errorf("final flush wrote %q, want %q", written, "# Final flush\n")
+	}
+}
+
+func TestServer_UnmountTwiceDoesNotPanic(t *testing.T) {
+	s := NewServer(nil, "/tmp/test-mount")
+	go s.syncLoop()
+
+	// Calling stopUnmount twice must not panic (double close of channel).
+	// We call the exported Unmount twice but need s.server non-nil to reach
+	// the close path. Use a minimal shim to avoid the early return.
+	s.server = nil
+
+	// Directly test the stop mechanism: first close signals the loop.
+	s.stopUnmount()
+	// Second call must not panic.
+	s.stopUnmount()
+}
+
 func TestFileOpen_TruncRegistersDirtyWithServer(t *testing.T) {
 	h := &stubHandler{}
 	s := NewServer(h, "/tmp/test-mount")

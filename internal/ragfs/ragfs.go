@@ -26,6 +26,8 @@ type Server struct {
 	dirtyMu      sync.Mutex
 	dirtyFiles   map[*File]struct{}
 	stopSync     chan struct{}
+	syncDone     chan struct{}
+	stopOnce     sync.Once
 }
 
 // ServerOption configures a Server.
@@ -62,6 +64,7 @@ func NewServer(handler Handler, mountpoint string, opts ...ServerOption) *Server
 		syncInterval: time.Second,
 		dirtyFiles:   make(map[*File]struct{}),
 		stopSync:     make(chan struct{}),
+		syncDone:     make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(s)
@@ -147,6 +150,7 @@ func (s *Server) unregisterDirty(f *File) {
 
 // syncLoop runs in a goroutine and periodically flushes dirty files.
 func (s *Server) syncLoop() {
+	defer close(s.syncDone)
 	ticker := time.NewTicker(s.syncInterval)
 	defer ticker.Stop()
 
@@ -175,11 +179,20 @@ func (s *Server) flushAllDirty() {
 	}
 }
 
+// stopUnmount signals the sync loop to stop and waits for its final flush
+// to complete. It is safe to call multiple times.
+func (s *Server) stopUnmount() {
+	s.stopOnce.Do(func() {
+		close(s.stopSync)
+	})
+	<-s.syncDone
+}
+
 // Unmount cleanly unmounts the FUSE filesystem.
 func (s *Server) Unmount() error {
+	s.stopUnmount()
 	if s.server == nil {
 		return nil
 	}
-	close(s.stopSync)
 	return s.server.Unmount()
 }
