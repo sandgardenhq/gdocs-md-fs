@@ -215,6 +215,7 @@ type File struct {
 	mu      sync.Mutex
 	uid     uint32
 	gid     uint32
+	dirty   bool // true when content has been modified and needs flushing
 }
 
 // compile-time interface checks
@@ -225,6 +226,7 @@ var (
 	_ fs.NodeOpener    = (*File)(nil)
 	_ fs.NodeReader    = (*File)(nil)
 	_ fs.NodeWriter    = (*File)(nil)
+	_ fs.NodeFlusher   = (*File)(nil)
 )
 
 // Getattr returns file attributes.
@@ -244,10 +246,8 @@ func (f *File) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut)
 func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	if sz, ok := in.GetSize(); ok {
 		if sz == 0 {
-			if err := f.handler.Write(ctx, f.path, nil); err != nil {
-				return syscall.EIO
-			}
-			f.cache.Invalidate(f.path)
+			f.cache.PutContent(f.path, []byte{})
+			f.dirty = true
 			if f.entry != nil {
 				f.entry.Size = 0
 				f.entry.ModTime = time.Now()
@@ -271,10 +271,8 @@ func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 // may not send a separate SETATTR for truncation after OPEN.
 func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if flags&syscall.O_TRUNC != 0 {
-		if err := f.handler.Write(ctx, f.path, nil); err != nil {
-			return nil, 0, syscall.EIO
-		}
-		f.cache.Invalidate(f.path)
+		f.cache.PutContent(f.path, []byte{})
+		f.dirty = true
 		if f.entry != nil {
 			f.entry.Size = 0
 			f.entry.ModTime = time.Now()
@@ -344,14 +342,12 @@ func (f *File) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int
 
 	copy(current[off:], data)
 
-	if err := f.handler.Write(ctx, f.path, current); err != nil {
-		return 0, syscall.EIO
-	}
-
 	// Update the cache with the written content so subsequent reads
-	// serve from cache rather than re-fetching from Google, which
-	// avoids stale data between the truncation and write steps.
+	// serve from cache rather than re-fetching from Google.
+	// Persistence to the backend is deferred to Flush.
 	f.cache.PutContent(f.path, current)
+
+	f.dirty = true
 
 	if f.entry != nil {
 		f.entry.Size = uint64(len(current))
@@ -359,6 +355,30 @@ func (f *File) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int
 	}
 
 	return uint32(len(data)), fs.OK
+}
+
+// Flush is called when a file descriptor is closed. It persists any dirty
+// content to the backend via a single atomic batch update, avoiding race
+// conditions between separate truncate and write API calls.
+func (f *File) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if !f.dirty {
+		return fs.OK
+	}
+
+	content := f.cache.GetContent(f.path)
+	if content == nil {
+		content = []byte{}
+	}
+
+	if err := f.handler.Write(ctx, f.path, content); err != nil {
+		return syscall.EIO
+	}
+
+	f.dirty = false
+	return fs.OK
 }
 
 // mimeGoogleDoc is the MIME type for Google Docs, defined here to avoid

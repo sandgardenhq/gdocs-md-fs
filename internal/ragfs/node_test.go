@@ -16,6 +16,7 @@ type stubHandler struct {
 	readErr      error
 	writeErr     error
 	lastWritten  []byte
+	writeCalled  bool
 	createEntry  *Entry
 	createErr    error
 }
@@ -24,6 +25,7 @@ func (h *stubHandler) Read(_ context.Context, _ string) ([]byte, error) {
 	return h.readContent, h.readErr
 }
 func (h *stubHandler) Write(_ context.Context, _ string, data []byte) error {
+	h.writeCalled = true
 	h.lastWritten = make([]byte, len(data))
 	copy(h.lastWritten, data)
 	return h.writeErr
@@ -253,10 +255,11 @@ func TestFileOpen_TruncatesOnOTRUNC(t *testing.T) {
 		t.Errorf("Open flags %#x missing FOPEN_DIRECT_IO", flags)
 	}
 
-	// After O_TRUNC, the handler should have been called with nil/empty data
-	// to truncate the file.
-	if len(h.lastWritten) > 0 {
-		t.Errorf("expected truncation write (nil/empty), got %d bytes", len(h.lastWritten))
+	// Open O_TRUNC must NOT call the handler — no API call. The actual
+	// write to Google happens later in Flush, avoiding a race between
+	// the truncation API call and the subsequent Write's GetDoc call.
+	if h.writeCalled {
+		t.Error("Open O_TRUNC must not call handler.Write (causes API race condition)")
 	}
 
 	// Entry size should be 0 after truncation.
@@ -264,9 +267,15 @@ func TestFileOpen_TruncatesOnOTRUNC(t *testing.T) {
 		t.Errorf("entry.Size after O_TRUNC: got %d, want 0", entry.Size)
 	}
 
-	// Cache should be invalidated so next read fetches fresh content.
-	if cache.GetContent("doc.md") != nil {
-		t.Error("cache should be invalidated after O_TRUNC")
+	// Cache should contain EMPTY content (not be invalidated) so that
+	// the subsequent Write reads empty from cache instead of fetching
+	// stale data from the API.
+	cached := cache.GetContent("doc.md")
+	if cached == nil {
+		t.Fatal("cache should contain empty content after O_TRUNC, not be invalidated")
+	}
+	if len(cached) != 0 {
+		t.Errorf("cached content after O_TRUNC: got %d bytes, want 0", len(cached))
 	}
 }
 
@@ -300,6 +309,194 @@ func TestFileWrite_UpdatesCacheWithWrittenContent(t *testing.T) {
 	if cached == nil {
 		t.Fatal("cache should contain written content after Write")
 	}
+	if string(cached) != string(data) {
+		t.Errorf("cached content: got %q, want %q", cached, data)
+	}
+}
+
+func TestFileSetattr_TruncateDoesNotCallHandler(t *testing.T) {
+	content := []byte("# Existing content\n")
+	h := &stubHandler{readContent: content}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(content)),
+	}
+	cache := NewCache()
+	cache.PutContent("doc.md", content)
+
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 0
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+
+	// Setattr with size=0 must NOT call handler.Write — same as Open O_TRUNC.
+	if h.writeCalled {
+		t.Error("Setattr size=0 must not call handler.Write (causes API race condition)")
+	}
+
+	// Entry size should be 0.
+	if entry.Size != 0 {
+		t.Errorf("entry.Size after Setattr: got %d, want 0", entry.Size)
+	}
+
+	// Cache should contain empty content.
+	cached := cache.GetContent("doc.md")
+	if cached == nil {
+		t.Fatal("cache should contain empty content after Setattr size=0")
+	}
+	if len(cached) != 0 {
+		t.Errorf("cached content after Setattr size=0: got %d bytes, want 0", len(cached))
+	}
+}
+
+func TestFileFlush_SendsDirtyContentToHandler(t *testing.T) {
+	h := &stubHandler{readContent: []byte{}}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     0,
+	}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// Simulate the Open→Write→Flush sequence that echo "text" > file does.
+	// Open with O_TRUNC (caches empty, no API call).
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_TRUNC))
+	if errno != 0 {
+		t.Fatalf("Open returned errno %d", errno)
+	}
+	if h.writeCalled {
+		t.Fatal("Open should not have called handler.Write")
+	}
+
+	// Write data.
+	data := []byte("# New content\n")
+	_, errno = f.Write(context.Background(), nil, data, 0)
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+
+	// Flush should send the content to the handler.
+	h.writeCalled = false
+	h.lastWritten = nil
+	errno = f.Flush(context.Background(), nil)
+	if errno != 0 {
+		t.Fatalf("Flush returned errno %d", errno)
+	}
+
+	if !h.writeCalled {
+		t.Error("Flush must call handler.Write to persist dirty content")
+	}
+	if string(h.lastWritten) != string(data) {
+		t.Errorf("Flush wrote %q, want %q", h.lastWritten, data)
+	}
+}
+
+func TestFileFlush_SkipsCleanFile(t *testing.T) {
+	h := &stubHandler{readContent: []byte("# Existing\n")}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	// Open for read-only (no O_TRUNC, no writes).
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_RDONLY))
+	if errno != 0 {
+		t.Fatalf("Open returned errno %d", errno)
+	}
+
+	// Flush on a clean file should NOT call handler.Write.
+	h.writeCalled = false
+	errno = f.Flush(context.Background(), nil)
+	if errno != 0 {
+		t.Fatalf("Flush returned errno %d", errno)
+	}
+
+	if h.writeCalled {
+		t.Error("Flush must not call handler.Write for a clean (unmodified) file")
+	}
+}
+
+func TestFileFlush_SendsEmptyOnTruncateOnly(t *testing.T) {
+	content := []byte("# Old content\n")
+	h := &stubHandler{readContent: content}
+	cache := NewCache()
+	cache.PutContent("doc.md", content)
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: uint64(len(content))},
+	}
+
+	// Open with O_TRUNC but don't write anything (e.g., `truncate -s 0 file`).
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_TRUNC))
+	if errno != 0 {
+		t.Fatalf("Open returned errno %d", errno)
+	}
+
+	// Flush should send empty content to truncate the doc on Google.
+	h.writeCalled = false
+	errno = f.Flush(context.Background(), nil)
+	if errno != 0 {
+		t.Fatalf("Flush returned errno %d", errno)
+	}
+
+	if !h.writeCalled {
+		t.Error("Flush must call handler.Write to persist truncation")
+	}
+	if len(h.lastWritten) != 0 {
+		t.Errorf("Flush wrote %d bytes for truncate-only, want 0", len(h.lastWritten))
+	}
+}
+
+func TestFileWrite_DoesNotCallHandler(t *testing.T) {
+	h := &stubHandler{readContent: []byte{}}
+	cache := NewCache()
+	cache.PutContent("doc.md", []byte{})
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	data := []byte("# Hello\n")
+	written, errno := f.Write(context.Background(), nil, data, 0)
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+	if written != uint32(len(data)) {
+		t.Errorf("Write returned %d, want %d", written, len(data))
+	}
+
+	// Write must NOT call handler.Write — persistence is deferred to Flush.
+	if h.writeCalled {
+		t.Error("Write must not call handler.Write; persistence should be deferred to Flush")
+	}
+
+	// Cache should contain the written content.
+	cached := cache.GetContent("doc.md")
 	if string(cached) != string(data) {
 		t.Errorf("cached content: got %q, want %q", cached, data)
 	}
