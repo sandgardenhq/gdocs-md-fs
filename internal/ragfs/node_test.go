@@ -697,18 +697,20 @@ func TestFileWrite_ClampsStaleOffsetToContentEnd(t *testing.T) {
 }
 
 func TestFileWrite_ClampsStaleOffsetWithCachedContent(t *testing.T) {
-	// Same bug but with stale CACHED content (cache not expired yet,
-	// but doc was edited externally). The cache has old long content.
+	// Bug: kernel uses a stale entry.Size that exceeds actual cached content
+	// length. Write should clamp the offset to avoid zero-byte padding even
+	// when the content source is stale cache rather than a fresh handler read.
 	staleContent := []byte("# This is old cached content that is very long\n") // 48 bytes
 	freshContent := []byte("# Short\n")                                        // 9 bytes
 	h := &stubHandler{readContent: freshContent}
+	staleSize := uint64(len(staleContent) + 100) // kernel thinks file is 148 bytes
 	entry := &Entry{
 		Name:     "doc.md",
 		MimeType: mimeGoogleDoc,
-		Size:     uint64(len(staleContent)),
+		Size:     staleSize,
 	}
 	cache := NewCache()
-	cache.PutContent("doc.md", staleContent) // stale cache
+	cache.PutContent("doc.md", staleContent) // stale cache: 48 bytes
 	f := &File{
 		handler: h,
 		cache:   cache,
@@ -717,8 +719,9 @@ func TestFileWrite_ClampsStaleOffsetWithCachedContent(t *testing.T) {
 	}
 
 	appendData := []byte("appended\n")
-	// Kernel uses stale entry.Size (48) as offset.
-	written, errno := f.Write(context.Background(), nil, appendData, int64(len(staleContent)))
+	// Kernel sends offset=148 based on stale entry.Size, but cached content
+	// is only 48 bytes. Write must clamp to 48.
+	written, errno := f.Write(context.Background(), nil, appendData, int64(staleSize))
 	if errno != 0 {
 		t.Fatalf("Write returned errno %d", errno)
 	}
@@ -726,9 +729,8 @@ func TestFileWrite_ClampsStaleOffsetWithCachedContent(t *testing.T) {
 		t.Errorf("Write returned %d, want %d", written, len(appendData))
 	}
 
-	// With stale cache, Write uses cached content as base. The append at
-	// offset=48 is valid for 48-byte cached content, so no clamping needed
-	// here. The pendingData should be staleContent + appendData.
+	// The offset should be clamped to len(staleContent)=48, so pendingData
+	// is staleContent + appendData with no zero-byte gap.
 	want := string(staleContent) + string(appendData)
 	if string(f.pendingData) != want {
 		t.Errorf("pendingData: got %q (len=%d), want %q (len=%d)",
@@ -1012,6 +1014,91 @@ func TestFileOpen_DirtyWithReadError_ReturnsEIO(t *testing.T) {
 	if f.pendingData == nil {
 		t.Error("pendingData should be preserved on read error")
 	}
+}
+
+func TestFileOpen_TruncThenReopenForWrite_NoSpuriousESTALE(t *testing.T) {
+	// Bug: Open with O_TRUNC sets pendingData and dirty but not baseContent.
+	// After flushing, re-opening for write sees pendingData==nil (clean) and
+	// sets baseContent from remote. A subsequent write+re-open finds
+	// pendingData!=nil and compares remote against baseContent. But if the
+	// first open was O_TRUNC *without* flushing, baseContent is nil, causing
+	// bytes.Equal(content, nil) to be false for non-empty remote → spurious ESTALE.
+	remoteContent := []byte("# Remote content\n")
+	h := &stubHandler{readContent: remoteContent}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(remoteContent)),
+	}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// Open with O_TRUNC — truncates the file.
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_TRUNC|syscall.O_WRONLY))
+	if errno != 0 {
+		t.Fatalf("O_TRUNC Open returned errno %d", errno)
+	}
+
+	// Write some data to the truncated file.
+	_, errno = f.Write(context.Background(), nil, []byte("new content\n"), 0)
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+
+	// Re-open for write without flushing. Remote still has original content
+	// which differs from the empty baseContent. This should NOT return ESTALE
+	// because the truncation was intentional.
+	_, _, errno = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno == syscall.ESTALE {
+		t.Fatal("Open returned spurious ESTALE after O_TRUNC; baseContent was not set correctly")
+	}
+	if errno != 0 {
+		t.Fatalf("Open returned unexpected errno %d", errno)
+	}
+}
+
+func TestFileOpen_ConcurrentWriteAndOpen_NoRace(t *testing.T) {
+	// Verify that Open and Write do not race on shared fields
+	// (pendingData, dirty, baseContent, entry.Size).
+	// Run with -race to detect data races.
+	original := []byte("# Original\n")
+	h := &stubHandler{readContent: original}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(original)),
+	}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// Prime baseContent via initial write-open.
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != 0 {
+		t.Fatalf("initial Open returned errno %d", errno)
+	}
+
+	done := make(chan struct{})
+	// Goroutine 1: concurrent writes.
+	go func() {
+		defer close(done)
+		for range 50 {
+			_, _ = f.Write(context.Background(), nil, []byte("data\n"), 0)
+		}
+	}()
+	// Goroutine 2: concurrent re-opens.
+	for range 50 {
+		_, _, _ = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	}
+	<-done
 }
 
 func TestCreateFuseFlags_IncludesDirectIO(t *testing.T) {

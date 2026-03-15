@@ -291,27 +291,43 @@ func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 // may not send a separate SETATTR for truncation after OPEN.
 func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if flags&syscall.O_TRUNC != 0 {
+		// Read remote content outside the lock (potentially slow I/O)
+		// to record as baseline for conflict detection on re-open.
+		var base []byte
+		if f.handler != nil {
+			if content, err := f.handler.Read(ctx, f.path); err == nil {
+				base = make([]byte, len(content))
+				copy(base, content)
+			}
+		}
+
+		f.mu.Lock()
+		if base != nil {
+			f.baseContent = base
+		} else {
+			f.baseContent = []byte{}
+		}
 		f.cache.PutContent(f.path, []byte{})
 		f.pendingData = []byte{}
 		f.dirty = true
-		if f.server != nil {
-			f.server.registerDirty(f)
-		}
 		if f.entry != nil {
 			f.entry.Size = 0
 			f.entry.ModTime = time.Now()
 		}
+		f.mu.Unlock()
+		if f.server != nil {
+			f.server.registerDirty(f)
+		}
 	} else if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND) != 0 {
-		// Refresh content and entry.Size for write operations so the
-		// kernel uses the correct file size for O_APPEND offset
-		// calculation. Without this, a stale entry.Size causes the
-		// kernel to send write offsets beyond actual content, producing
-		// zero-byte padding that corrupts the document.
+		// Read remote content outside the lock (potentially slow I/O).
 		content, err := f.handler.Read(ctx, f.path)
+
+		f.mu.Lock()
 		if err != nil {
 			if f.pendingData != nil {
 				// Cannot verify remote state while dirty; refuse to
 				// open with stale data that could corrupt the doc.
+				f.mu.Unlock()
 				return nil, 0, syscall.EIO
 			}
 			// Non-dirty open: proceed without refresh; Write will
@@ -328,6 +344,7 @@ func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 				if f.entry != nil {
 					f.entry.Size = uint64(len(content))
 				}
+				f.mu.Unlock()
 				return nil, 0, syscall.ESTALE
 			}
 			// Remote unchanged: keep pendingData, update entry.Size
@@ -345,6 +362,7 @@ func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 				f.entry.Size = uint64(len(content))
 			}
 		}
+		f.mu.Unlock()
 	}
 	return nil, fuse.FOPEN_DIRECT_IO, fs.OK
 }

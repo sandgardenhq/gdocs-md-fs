@@ -5,6 +5,42 @@ import (
 	"testing"
 )
 
+func TestNormalizePath_EmptyString(t *testing.T) {
+	if got := normalizePath(""); got != "/" {
+		t.Errorf("normalizePath(%q) = %q, want %q", "", got, "/")
+	}
+}
+
+func TestNormalizePath_NoLeadingSlash(t *testing.T) {
+	if got := normalizePath("docs/file.md"); got != "/docs/file.md" {
+		t.Errorf("normalizePath(%q) = %q, want %q", "docs/file.md", got, "/docs/file.md")
+	}
+}
+
+func TestNormalizePath_WithLeadingSlash(t *testing.T) {
+	if got := normalizePath("/docs/file.md"); got != "/docs/file.md" {
+		t.Errorf("normalizePath(%q) = %q, want %q", "/docs/file.md", got, "/docs/file.md")
+	}
+}
+
+func TestNormalizePath_Dot(t *testing.T) {
+	if got := normalizePath("."); got != "/" {
+		t.Errorf("normalizePath(%q) = %q, want %q", ".", got, "/")
+	}
+}
+
+func TestNormalizePath_RootSlash(t *testing.T) {
+	if got := normalizePath("/"); got != "/" {
+		t.Errorf("normalizePath(%q) = %q, want %q", "/", got, "/")
+	}
+}
+
+func TestNormalizePath_TrailingSlash(t *testing.T) {
+	if got := normalizePath("docs/"); got != "/docs" {
+		t.Errorf("normalizePath(%q) = %q, want %q", "docs/", got, "/docs")
+	}
+}
+
 func TestResolvePathEntry_WithoutLeadingSlash(t *testing.T) {
 	// Bug: FUSE root Dir has path="" so Lookup passes "Hello World.md"
 	// (no leading slash) to handler.Stat -> resolvePathEntry. But the
