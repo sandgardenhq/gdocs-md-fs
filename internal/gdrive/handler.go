@@ -53,10 +53,19 @@ func (h *DriveHandler) List(ctx context.Context, dirPath string) ([]ragfs.Entry,
 		return nil, err
 	}
 
+	// Normalize dirPath for consistent cache keys.
+	normDir := path.Clean(dirPath)
+	if normDir == "." || normDir == "" {
+		normDir = "/"
+	}
+	if !strings.HasPrefix(normDir, "/") {
+		normDir = "/" + normDir
+	}
+
 	entries := make([]ragfs.Entry, 0, len(files))
 	for _, f := range files {
 		entry := driveFileToEntry(f)
-		childPath := path.Join(dirPath, entry.Name)
+		childPath := path.Join(normDir, entry.Name)
 
 		// Cache the path mapping.
 		h.mu.Lock()
@@ -277,10 +286,14 @@ func (h *DriveHandler) resolveFileID(ctx context.Context, fsPath string) (string
 // is not cached, it walks the path from the root, listing folders as needed to
 // populate the cache.
 func (h *DriveHandler) resolvePathEntry(ctx context.Context, fsPath string) (*pathEntry, error) {
-	// Normalize.
+	// Normalize to always have a leading slash so cache keys are consistent
+	// regardless of whether the caller passes "file.md" or "/file.md".
 	fsPath = path.Clean(fsPath)
 	if fsPath == "." || fsPath == "" {
 		fsPath = "/"
+	}
+	if !strings.HasPrefix(fsPath, "/") {
+		fsPath = "/" + fsPath
 	}
 
 	// Check cache first.
