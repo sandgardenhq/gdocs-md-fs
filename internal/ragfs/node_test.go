@@ -657,6 +657,137 @@ func TestFileFlush_ClearsPendingDataAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestFileWrite_ClampsStaleOffsetToContentEnd(t *testing.T) {
+	// Bug: kernel uses stale entry.Size for O_APPEND offset. If the doc was
+	// edited externally to be shorter, the offset exceeds actual content
+	// length. Write should clamp the offset to avoid zero-byte padding.
+	freshContent := []byte("# Short\n") // 9 bytes - actual content from Drive
+	h := &stubHandler{readContent: freshContent}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     996, // stale size from previous read
+	}
+	cache := NewCache()
+	// No cached content — cache expired, forcing handler.Read for fresh data.
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	appendData := []byte("new text\n")
+	// Kernel sends offset=996 based on stale entry.Size.
+	written, errno := f.Write(context.Background(), nil, appendData, 996)
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+	if written != uint32(len(appendData)) {
+		t.Errorf("Write returned %d, want %d", written, len(appendData))
+	}
+
+	// The pendingData should be fresh content + appended data, NOT
+	// 996 bytes of padded content. The offset must be clamped to len(freshContent).
+	want := string(freshContent) + string(appendData)
+	if string(f.pendingData) != want {
+		t.Errorf("pendingData: got %q (len=%d), want %q (len=%d)",
+			f.pendingData, len(f.pendingData), want, len(want))
+	}
+}
+
+func TestFileWrite_ClampsStaleOffsetWithCachedContent(t *testing.T) {
+	// Same bug but with stale CACHED content (cache not expired yet,
+	// but doc was edited externally). The cache has old long content.
+	staleContent := []byte("# This is old cached content that is very long\n") // 48 bytes
+	freshContent := []byte("# Short\n")                                        // 9 bytes
+	h := &stubHandler{readContent: freshContent}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(staleContent)),
+	}
+	cache := NewCache()
+	cache.PutContent("doc.md", staleContent) // stale cache
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	appendData := []byte("appended\n")
+	// Kernel uses stale entry.Size (48) as offset.
+	written, errno := f.Write(context.Background(), nil, appendData, int64(len(staleContent)))
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+	if written != uint32(len(appendData)) {
+		t.Errorf("Write returned %d, want %d", written, len(appendData))
+	}
+
+	// With stale cache, Write uses cached content as base. The append at
+	// offset=48 is valid for 48-byte cached content, so no clamping needed
+	// here. The pendingData should be staleContent + appendData.
+	want := string(staleContent) + string(appendData)
+	if string(f.pendingData) != want {
+		t.Errorf("pendingData: got %q (len=%d), want %q (len=%d)",
+			f.pendingData, len(f.pendingData), want, len(want))
+	}
+}
+
+func TestFilePersist_InvalidatesContentCache(t *testing.T) {
+	// After a successful persist, the content cache should be invalidated
+	// because the markdown round-trip through Google Docs may produce
+	// different content than what was cached.
+	h := &stubHandler{readContent: []byte{}}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	// Write and flush.
+	_, _ = f.Write(context.Background(), nil, []byte("# Content\n"), 0)
+	_ = f.Flush(context.Background(), nil)
+
+	// Cache should be invalidated after successful persist.
+	if cache.GetContent("doc.md") != nil {
+		t.Error("content cache should be invalidated after successful persist")
+	}
+}
+
+func TestFileOpen_WriteRefreshesEntrySize(t *testing.T) {
+	// When opening for write (not truncate), entry.Size should be
+	// refreshed from actual content to prevent stale kernel offsets.
+	freshContent := []byte("# Fresh\n") // 9 bytes
+	h := &stubHandler{readContent: freshContent}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     996, // stale
+	}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// Open for write (append mode).
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != 0 {
+		t.Fatalf("Open returned errno %d", errno)
+	}
+
+	// entry.Size should be refreshed to actual content length.
+	if entry.Size != uint64(len(freshContent)) {
+		t.Errorf("entry.Size after Open O_WRONLY: got %d, want %d", entry.Size, len(freshContent))
+	}
+}
+
 func TestFileOpen_TruncSetsEmptyPendingData(t *testing.T) {
 	f := &File{
 		cache: NewCache(),

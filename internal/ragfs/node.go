@@ -299,6 +299,19 @@ func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 			f.entry.Size = 0
 			f.entry.ModTime = time.Now()
 		}
+	} else if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND) != 0 {
+		// Refresh content and entry.Size for write operations so the
+		// kernel uses the correct file size for O_APPEND offset
+		// calculation. Without this, a stale entry.Size causes the
+		// kernel to send write offsets beyond actual content, producing
+		// zero-byte padding that corrupts the document.
+		content, err := f.handler.Read(ctx, f.path)
+		if err == nil {
+			f.cache.PutContent(f.path, content)
+			if f.entry != nil {
+				f.entry.Size = uint64(len(content))
+			}
+		}
 	}
 	return nil, fuse.FOPEN_DIRECT_IO, fs.OK
 }
@@ -341,9 +354,13 @@ func (f *File) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	// Read current content.
+	// Read current content, preferring pendingData from prior writes
+	// in this session, then cache, then fresh from handler.
 	var current []byte
-	if cached := f.cache.GetContent(f.path); cached != nil {
+	if f.pendingData != nil {
+		current = make([]byte, len(f.pendingData))
+		copy(current, f.pendingData)
+	} else if cached := f.cache.GetContent(f.path); cached != nil {
 		current = make([]byte, len(cached))
 		copy(current, cached)
 	} else {
@@ -353,6 +370,14 @@ func (f *File) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int
 		} else {
 			current = existing
 		}
+	}
+
+	// Clamp offset to actual content length. The kernel may use a stale
+	// entry.Size for O_APPEND, producing an offset beyond the real
+	// content. Without clamping, the gap fills with zero bytes which
+	// corrupt the Google Doc when flushed.
+	if int(off) > len(current) {
+		off = int64(len(current))
 	}
 
 	newEnd := int(off) + len(data)
@@ -423,6 +448,11 @@ func (f *File) persistLocked(ctx context.Context) syscall.Errno {
 
 	f.pendingData = nil
 	f.dirty = false
+	// Invalidate the content cache after a successful write. The
+	// markdown→Doc→markdown round-trip may produce different content than
+	// what was cached, so stale cache could cause offset mismatches on
+	// subsequent appends.
+	f.cache.Invalidate(f.path)
 	if f.server != nil {
 		f.server.unregisterDirty(f)
 	}
