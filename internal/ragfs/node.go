@@ -1,6 +1,7 @@
 package ragfs
 
 import (
+	"bytes"
 	"context"
 	"log"
 	"path"
@@ -228,6 +229,7 @@ type File struct {
 	gid     uint32
 	dirty       bool    // true when content has been modified and needs flushing
 	pendingData []byte  // buffered content that survives cache TTL/eviction
+	baseContent []byte  // remote content at time of first write; used to detect remote changes
 	server      *Server // parent server for dirty file registration
 	logger      *log.Logger
 }
@@ -306,7 +308,38 @@ func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		// kernel to send write offsets beyond actual content, producing
 		// zero-byte padding that corrupts the document.
 		content, err := f.handler.Read(ctx, f.path)
-		if err == nil {
+		if err != nil {
+			if f.pendingData != nil {
+				// Cannot verify remote state while dirty; refuse to
+				// open with stale data that could corrupt the doc.
+				return nil, 0, syscall.EIO
+			}
+			// Non-dirty open: proceed without refresh; Write will
+			// fetch content itself if needed.
+		} else if f.pendingData != nil {
+			// Dirty file re-opened: check if remote changed since
+			// we started writing. If so, discard local edits to
+			// avoid writing against a stale base.
+			if !bytes.Equal(content, f.baseContent) {
+				f.pendingData = nil
+				f.dirty = false
+				f.baseContent = nil
+				f.cache.PutContent(f.path, content)
+				if f.entry != nil {
+					f.entry.Size = uint64(len(content))
+				}
+				return nil, 0, syscall.ESTALE
+			}
+			// Remote unchanged: keep pendingData, update entry.Size
+			// to reflect pending content so kernel sends correct offsets.
+			if f.entry != nil {
+				f.entry.Size = uint64(len(f.pendingData))
+			}
+		} else {
+			// Clean file: cache remote content and record as base
+			// for future conflict detection.
+			f.baseContent = make([]byte, len(content))
+			copy(f.baseContent, content)
 			f.cache.PutContent(f.path, content)
 			if f.entry != nil {
 				f.entry.Size = uint64(len(content))
@@ -447,6 +480,7 @@ func (f *File) persistLocked(ctx context.Context) syscall.Errno {
 	}
 
 	f.pendingData = nil
+	f.baseContent = nil
 	f.dirty = false
 	// Invalidate the content cache after a successful write. The
 	// markdown→Doc→markdown round-trip may produce different content than

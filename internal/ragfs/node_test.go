@@ -871,6 +871,149 @@ func TestFile_PersistIfDirty_SkipsCleanFile(t *testing.T) {
 	}
 }
 
+func TestFileOpen_DirtyWithUnchangedRemote_KeepsPendingData(t *testing.T) {
+	// When re-opening a file that has dirty pending writes and the remote
+	// content hasn't changed, Open should keep pendingData and succeed.
+	original := []byte("# Original\n")
+	h := &stubHandler{readContent: original}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(original)),
+	}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// First open for write — primes baseContent.
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != 0 {
+		t.Fatalf("first Open returned errno %d", errno)
+	}
+
+	// Write some data — file becomes dirty.
+	appendData := []byte("appended\n")
+	_, errno = f.Write(context.Background(), nil, appendData, int64(len(original)))
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+
+	// Remote content unchanged (handler still returns original).
+	_, _, errno = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != 0 {
+		t.Fatalf("second Open should succeed when remote unchanged, got errno %d", errno)
+	}
+
+	// pendingData should be preserved.
+	want := string(original) + string(appendData)
+	if string(f.pendingData) != want {
+		t.Errorf("pendingData: got %q, want %q", f.pendingData, want)
+	}
+
+	// entry.Size should reflect pending content length.
+	if entry.Size != uint64(len(want)) {
+		t.Errorf("entry.Size: got %d, want %d", entry.Size, len(want))
+	}
+}
+
+func TestFileOpen_DirtyWithChangedRemote_DiscardsPendingData(t *testing.T) {
+	// When re-opening a file that has dirty pending writes and the remote
+	// content has changed, Open should discard pendingData, clear dirty,
+	// and return ESTALE to signal the conflict.
+	original := []byte("# Original\n")
+	h := &stubHandler{readContent: original}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(original)),
+	}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// First open for write — primes baseContent.
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != 0 {
+		t.Fatalf("first Open returned errno %d", errno)
+	}
+
+	// Write some data — file becomes dirty.
+	_, errno = f.Write(context.Background(), nil, []byte("appended\n"), int64(len(original)))
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+
+	// Remote content changed (someone edited the doc).
+	remoteChanged := []byte("# Modified remotely\n")
+	h.readContent = remoteChanged
+
+	_, _, errno = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != syscall.ESTALE {
+		t.Fatalf("second Open should return ESTALE when remote changed, got errno %d", errno)
+	}
+
+	// pendingData should be discarded.
+	if f.pendingData != nil {
+		t.Errorf("pendingData should be nil after conflict, got %q", f.pendingData)
+	}
+	if f.dirty {
+		t.Error("dirty should be false after conflict")
+	}
+
+	// Cache and entry.Size should reflect the new remote content.
+	cached := cache.GetContent("doc.md")
+	if string(cached) != string(remoteChanged) {
+		t.Errorf("cache: got %q, want %q", cached, remoteChanged)
+	}
+	if entry.Size != uint64(len(remoteChanged)) {
+		t.Errorf("entry.Size: got %d, want %d", entry.Size, len(remoteChanged))
+	}
+}
+
+func TestFileOpen_DirtyWithReadError_ReturnsEIO(t *testing.T) {
+	// When re-opening a dirty file and the remote read fails,
+	// Open should return EIO rather than silently leaving entry.Size stale.
+	original := []byte("# Original\n")
+	h := &stubHandler{readContent: original}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(original)),
+	}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// First open + write to make dirty.
+	_, _, _ = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	_, _ = f.Write(context.Background(), nil, []byte("data\n"), int64(len(original)))
+
+	// Remote read will fail.
+	h.readErr = fmt.Errorf("network error")
+
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != syscall.EIO {
+		t.Fatalf("Open with dirty+read error should return EIO, got errno %d", errno)
+	}
+
+	// pendingData should be preserved (don't discard on transient errors).
+	if f.pendingData == nil {
+		t.Error("pendingData should be preserved on read error")
+	}
+}
+
 func TestCreateFuseFlags_IncludesDirectIO(t *testing.T) {
 	// Dir.Create returns fuseFlags as the third return value.
 	// It must include FOPEN_DIRECT_IO so the kernel bypasses
