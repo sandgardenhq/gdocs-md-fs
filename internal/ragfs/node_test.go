@@ -657,6 +657,139 @@ func TestFileFlush_ClearsPendingDataAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestFileWrite_ClampsStaleOffsetToContentEnd(t *testing.T) {
+	// Bug: kernel uses stale entry.Size for O_APPEND offset. If the doc was
+	// edited externally to be shorter, the offset exceeds actual content
+	// length. Write should clamp the offset to avoid zero-byte padding.
+	freshContent := []byte("# Short\n") // 9 bytes - actual content from Drive
+	h := &stubHandler{readContent: freshContent}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     996, // stale size from previous read
+	}
+	cache := NewCache()
+	// No cached content — cache expired, forcing handler.Read for fresh data.
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	appendData := []byte("new text\n")
+	// Kernel sends offset=996 based on stale entry.Size.
+	written, errno := f.Write(context.Background(), nil, appendData, 996)
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+	if written != uint32(len(appendData)) {
+		t.Errorf("Write returned %d, want %d", written, len(appendData))
+	}
+
+	// The pendingData should be fresh content + appended data, NOT
+	// 996 bytes of padded content. The offset must be clamped to len(freshContent).
+	want := string(freshContent) + string(appendData)
+	if string(f.pendingData) != want {
+		t.Errorf("pendingData: got %q (len=%d), want %q (len=%d)",
+			f.pendingData, len(f.pendingData), want, len(want))
+	}
+}
+
+func TestFileWrite_ClampsStaleOffsetWithCachedContent(t *testing.T) {
+	// Bug: kernel uses a stale entry.Size that exceeds actual cached content
+	// length. Write should clamp the offset to avoid zero-byte padding even
+	// when the content source is stale cache rather than a fresh handler read.
+	staleContent := []byte("# This is old cached content that is very long\n") // 48 bytes
+	freshContent := []byte("# Short\n")                                        // 9 bytes
+	h := &stubHandler{readContent: freshContent}
+	staleSize := uint64(len(staleContent) + 100) // kernel thinks file is 148 bytes
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     staleSize,
+	}
+	cache := NewCache()
+	cache.PutContent("doc.md", staleContent) // stale cache: 48 bytes
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	appendData := []byte("appended\n")
+	// Kernel sends offset=148 based on stale entry.Size, but cached content
+	// is only 48 bytes. Write must clamp to 48.
+	written, errno := f.Write(context.Background(), nil, appendData, int64(staleSize))
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+	if written != uint32(len(appendData)) {
+		t.Errorf("Write returned %d, want %d", written, len(appendData))
+	}
+
+	// The offset should be clamped to len(staleContent)=48, so pendingData
+	// is staleContent + appendData with no zero-byte gap.
+	want := string(staleContent) + string(appendData)
+	if string(f.pendingData) != want {
+		t.Errorf("pendingData: got %q (len=%d), want %q (len=%d)",
+			f.pendingData, len(f.pendingData), want, len(want))
+	}
+}
+
+func TestFilePersist_InvalidatesContentCache(t *testing.T) {
+	// After a successful persist, the content cache should be invalidated
+	// because the markdown round-trip through Google Docs may produce
+	// different content than what was cached.
+	h := &stubHandler{readContent: []byte{}}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	// Write and flush.
+	_, _ = f.Write(context.Background(), nil, []byte("# Content\n"), 0)
+	_ = f.Flush(context.Background(), nil)
+
+	// Cache should be invalidated after successful persist.
+	if cache.GetContent("doc.md") != nil {
+		t.Error("content cache should be invalidated after successful persist")
+	}
+}
+
+func TestFileOpen_WriteRefreshesEntrySize(t *testing.T) {
+	// When opening for write (not truncate), entry.Size should be
+	// refreshed from actual content to prevent stale kernel offsets.
+	freshContent := []byte("# Fresh\n") // 9 bytes
+	h := &stubHandler{readContent: freshContent}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     996, // stale
+	}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// Open for write (append mode).
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != 0 {
+		t.Fatalf("Open returned errno %d", errno)
+	}
+
+	// entry.Size should be refreshed to actual content length.
+	if entry.Size != uint64(len(freshContent)) {
+		t.Errorf("entry.Size after Open O_WRONLY: got %d, want %d", entry.Size, len(freshContent))
+	}
+}
+
 func TestFileOpen_TruncSetsEmptyPendingData(t *testing.T) {
 	f := &File{
 		cache: NewCache(),
@@ -738,6 +871,234 @@ func TestFile_PersistIfDirty_SkipsCleanFile(t *testing.T) {
 	if h.writeCalled {
 		t.Error("persistIfDirty must not call handler.Write for clean file")
 	}
+}
+
+func TestFileOpen_DirtyWithUnchangedRemote_KeepsPendingData(t *testing.T) {
+	// When re-opening a file that has dirty pending writes and the remote
+	// content hasn't changed, Open should keep pendingData and succeed.
+	original := []byte("# Original\n")
+	h := &stubHandler{readContent: original}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(original)),
+	}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// First open for write — primes baseContent.
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != 0 {
+		t.Fatalf("first Open returned errno %d", errno)
+	}
+
+	// Write some data — file becomes dirty.
+	appendData := []byte("appended\n")
+	_, errno = f.Write(context.Background(), nil, appendData, int64(len(original)))
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+
+	// Remote content unchanged (handler still returns original).
+	_, _, errno = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != 0 {
+		t.Fatalf("second Open should succeed when remote unchanged, got errno %d", errno)
+	}
+
+	// pendingData should be preserved.
+	want := string(original) + string(appendData)
+	if string(f.pendingData) != want {
+		t.Errorf("pendingData: got %q, want %q", f.pendingData, want)
+	}
+
+	// entry.Size should reflect pending content length.
+	if entry.Size != uint64(len(want)) {
+		t.Errorf("entry.Size: got %d, want %d", entry.Size, len(want))
+	}
+}
+
+func TestFileOpen_DirtyWithChangedRemote_DiscardsPendingData(t *testing.T) {
+	// When re-opening a file that has dirty pending writes and the remote
+	// content has changed, Open should discard pendingData, clear dirty,
+	// and return ESTALE to signal the conflict.
+	original := []byte("# Original\n")
+	h := &stubHandler{readContent: original}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(original)),
+	}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// First open for write — primes baseContent.
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != 0 {
+		t.Fatalf("first Open returned errno %d", errno)
+	}
+
+	// Write some data — file becomes dirty.
+	_, errno = f.Write(context.Background(), nil, []byte("appended\n"), int64(len(original)))
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+
+	// Remote content changed (someone edited the doc).
+	remoteChanged := []byte("# Modified remotely\n")
+	h.readContent = remoteChanged
+
+	_, _, errno = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != syscall.ESTALE {
+		t.Fatalf("second Open should return ESTALE when remote changed, got errno %d", errno)
+	}
+
+	// pendingData should be discarded.
+	if f.pendingData != nil {
+		t.Errorf("pendingData should be nil after conflict, got %q", f.pendingData)
+	}
+	if f.dirty {
+		t.Error("dirty should be false after conflict")
+	}
+
+	// Cache and entry.Size should reflect the new remote content.
+	cached := cache.GetContent("doc.md")
+	if string(cached) != string(remoteChanged) {
+		t.Errorf("cache: got %q, want %q", cached, remoteChanged)
+	}
+	if entry.Size != uint64(len(remoteChanged)) {
+		t.Errorf("entry.Size: got %d, want %d", entry.Size, len(remoteChanged))
+	}
+}
+
+func TestFileOpen_DirtyWithReadError_ReturnsEIO(t *testing.T) {
+	// When re-opening a dirty file and the remote read fails,
+	// Open should return EIO rather than silently leaving entry.Size stale.
+	original := []byte("# Original\n")
+	h := &stubHandler{readContent: original}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(original)),
+	}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// First open + write to make dirty.
+	_, _, _ = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	_, _ = f.Write(context.Background(), nil, []byte("data\n"), int64(len(original)))
+
+	// Remote read will fail.
+	h.readErr = fmt.Errorf("network error")
+
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != syscall.EIO {
+		t.Fatalf("Open with dirty+read error should return EIO, got errno %d", errno)
+	}
+
+	// pendingData should be preserved (don't discard on transient errors).
+	if f.pendingData == nil {
+		t.Error("pendingData should be preserved on read error")
+	}
+}
+
+func TestFileOpen_TruncThenReopenForWrite_NoSpuriousESTALE(t *testing.T) {
+	// Bug: Open with O_TRUNC sets pendingData and dirty but not baseContent.
+	// After flushing, re-opening for write sees pendingData==nil (clean) and
+	// sets baseContent from remote. A subsequent write+re-open finds
+	// pendingData!=nil and compares remote against baseContent. But if the
+	// first open was O_TRUNC *without* flushing, baseContent is nil, causing
+	// bytes.Equal(content, nil) to be false for non-empty remote → spurious ESTALE.
+	remoteContent := []byte("# Remote content\n")
+	h := &stubHandler{readContent: remoteContent}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(remoteContent)),
+	}
+	cache := NewCache()
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// Open with O_TRUNC — truncates the file.
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_TRUNC|syscall.O_WRONLY))
+	if errno != 0 {
+		t.Fatalf("O_TRUNC Open returned errno %d", errno)
+	}
+
+	// Write some data to the truncated file.
+	_, errno = f.Write(context.Background(), nil, []byte("new content\n"), 0)
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+
+	// Re-open for write without flushing. Remote still has original content
+	// which differs from the empty baseContent. This should NOT return ESTALE
+	// because the truncation was intentional.
+	_, _, errno = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno == syscall.ESTALE {
+		t.Fatal("Open returned spurious ESTALE after O_TRUNC; baseContent was not set correctly")
+	}
+	if errno != 0 {
+		t.Fatalf("Open returned unexpected errno %d", errno)
+	}
+}
+
+func TestFileOpen_ConcurrentWriteAndOpen_NoRace(t *testing.T) {
+	// Verify that Open and Write do not race on shared fields
+	// (pendingData, dirty, baseContent, entry.Size).
+	// Run with -race to detect data races.
+	original := []byte("# Original\n")
+	h := &stubHandler{readContent: original}
+	entry := &Entry{
+		Name:     "doc.md",
+		MimeType: mimeGoogleDoc,
+		Size:     uint64(len(original)),
+	}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   entry,
+	}
+
+	// Prime baseContent via initial write-open.
+	_, _, errno := f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	if errno != 0 {
+		t.Fatalf("initial Open returned errno %d", errno)
+	}
+
+	done := make(chan struct{})
+	// Goroutine 1: concurrent writes.
+	go func() {
+		defer close(done)
+		for range 50 {
+			_, _ = f.Write(context.Background(), nil, []byte("data\n"), 0)
+		}
+	}()
+	// Goroutine 2: concurrent re-opens.
+	for range 50 {
+		_, _, _ = f.Open(context.Background(), uint32(syscall.O_WRONLY|syscall.O_APPEND))
+	}
+	<-done
 }
 
 func TestCreateFuseFlags_IncludesDirectIO(t *testing.T) {
