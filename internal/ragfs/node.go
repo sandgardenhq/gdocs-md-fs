@@ -37,6 +37,7 @@ var (
 	_ fs.NodeUnlinker  = (*Dir)(nil)
 	_ fs.NodeRenamer   = (*Dir)(nil)
 	_ fs.NodeMkdirer   = (*Dir)(nil)
+	_ fs.NodeStatfser  = (*Dir)(nil)
 )
 
 // Readdir returns all entries in this directory. Results are cached.
@@ -232,6 +233,19 @@ func (d *Dir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) 
 	} else {
 		out.Mtime = uint64(time.Now().Unix())
 	}
+	return fs.OK
+}
+
+// Statfs returns filesystem statistics. Google Drive doesn't map cleanly to
+// POSIX filesystem stats, so we return reasonable defaults that satisfy macOS
+// and editors checking filesystem capabilities.
+func (d *Dir) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
+	out.Bsize = 4096
+	out.Frsize = 4096
+	out.Blocks = 1 << 20 // ~4 GB apparent size
+	out.Bfree = 1 << 19
+	out.Bavail = 1 << 19
+	out.NameLen = 255
 	return fs.OK
 }
 
