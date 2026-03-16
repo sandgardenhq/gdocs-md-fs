@@ -1,6 +1,12 @@
 package ragfs
 
-import "testing"
+import (
+	"context"
+	"syscall"
+	"testing"
+
+	"github.com/hanwen/go-fuse/v2/fuse"
+)
 
 func TestIsTempFile(t *testing.T) {
 	temps := []string{
@@ -37,5 +43,155 @@ func TestIsTempFile_NonTemp(t *testing.T) {
 		if isTempFile(name) {
 			t.Errorf("isTempFile(%q) = true, want false", name)
 		}
+	}
+}
+
+func TestTempFile_Getattr(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	var out fuse.AttrOut
+	errno := tf.Getattr(context.Background(), nil, &out)
+	if errno != 0 {
+		t.Fatalf("Getattr returned errno %d", errno)
+	}
+	wantMode := uint32(syscall.S_IFREG | 0o644)
+	if out.Attr.Mode != wantMode {
+		t.Errorf("mode: got %o, want %o", out.Attr.Mode, wantMode)
+	}
+	if out.Attr.Uid != 501 {
+		t.Errorf("uid: got %d, want 501", out.Attr.Uid)
+	}
+	if out.Attr.Gid != 20 {
+		t.Errorf("gid: got %d, want 20", out.Attr.Gid)
+	}
+}
+
+func TestTempFile_WriteAndRead(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+
+	// Write data.
+	data := []byte("temporary content")
+	written, errno := tf.Write(context.Background(), nil, data, 0)
+	if errno != 0 {
+		t.Fatalf("Write returned errno %d", errno)
+	}
+	if written != uint32(len(data)) {
+		t.Errorf("Write returned %d, want %d", written, len(data))
+	}
+
+	// Read it back.
+	dest := make([]byte, 4096)
+	result, errno := tf.Read(context.Background(), nil, dest, 0)
+	if errno != 0 {
+		t.Fatalf("Read returned errno %d", errno)
+	}
+	got := make([]byte, result.Size())
+	buf, _ := result.Bytes(got)
+	if string(buf) != string(data) {
+		t.Errorf("Read: got %q, want %q", buf, data)
+	}
+}
+
+func TestTempFile_WriteAtOffset(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+
+	// Write initial data.
+	_, _ = tf.Write(context.Background(), nil, []byte("hello"), 0)
+	// Overwrite at offset.
+	_, errno := tf.Write(context.Background(), nil, []byte("WORLD"), 5)
+	if errno != 0 {
+		t.Fatalf("Write at offset returned errno %d", errno)
+	}
+
+	dest := make([]byte, 4096)
+	result, _ := tf.Read(context.Background(), nil, dest, 0)
+	got := make([]byte, result.Size())
+	buf, _ := result.Bytes(got)
+	if string(buf) != "helloWORLD" {
+		t.Errorf("Read after offset write: got %q, want %q", buf, "helloWORLD")
+	}
+}
+
+func TestTempFile_ReadAtOffset(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	_, _ = tf.Write(context.Background(), nil, []byte("hello world"), 0)
+
+	dest := make([]byte, 4096)
+	result, errno := tf.Read(context.Background(), nil, dest, 6)
+	if errno != 0 {
+		t.Fatalf("Read at offset returned errno %d", errno)
+	}
+	got := make([]byte, result.Size())
+	buf, _ := result.Bytes(got)
+	if string(buf) != "world" {
+		t.Errorf("Read at offset 6: got %q, want %q", buf, "world")
+	}
+}
+
+func TestTempFile_ReadBeyondEnd(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	_, _ = tf.Write(context.Background(), nil, []byte("short"), 0)
+
+	dest := make([]byte, 4096)
+	result, errno := tf.Read(context.Background(), nil, dest, 100)
+	if errno != 0 {
+		t.Fatalf("Read beyond end returned errno %d", errno)
+	}
+	if result.Size() != 0 {
+		t.Errorf("Read beyond end: got %d bytes, want 0", result.Size())
+	}
+}
+
+func TestTempFile_Open(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	_, flags, errno := tf.Open(context.Background(), 0)
+	if errno != 0 {
+		t.Fatalf("Open returned errno %d", errno)
+	}
+	if flags&fuse.FOPEN_DIRECT_IO == 0 {
+		t.Errorf("Open flags missing FOPEN_DIRECT_IO")
+	}
+}
+
+func TestTempFile_Flush(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	_, _ = tf.Write(context.Background(), nil, []byte("data"), 0)
+	errno := tf.Flush(context.Background(), nil)
+	if errno != 0 {
+		t.Fatalf("Flush returned errno %d, want OK", errno)
+	}
+}
+
+func TestTempFile_Setattr_Truncate(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	_, _ = tf.Write(context.Background(), nil, []byte("some content"), 0)
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 0
+	var out fuse.AttrOut
+	errno := tf.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+	if out.Attr.Size != 0 {
+		t.Errorf("size after truncate: got %d, want 0", out.Attr.Size)
+	}
+
+	// Read should return empty.
+	dest := make([]byte, 4096)
+	result, _ := tf.Read(context.Background(), nil, dest, 0)
+	if result.Size() != 0 {
+		t.Errorf("Read after truncate: got %d bytes, want 0", result.Size())
+	}
+}
+
+func TestTempFile_GetattrReflectsSize(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	_, _ = tf.Write(context.Background(), nil, []byte("12345"), 0)
+
+	var out fuse.AttrOut
+	_ = tf.Getattr(context.Background(), nil, &out)
+	if out.Attr.Size != 5 {
+		t.Errorf("size: got %d, want 5", out.Attr.Size)
 	}
 }
