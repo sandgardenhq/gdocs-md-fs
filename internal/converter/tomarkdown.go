@@ -123,7 +123,8 @@ func ToMarkdown(doc *docs.Document) ([]byte, error) {
 		}
 		prefix := headingPrefixFor(style)
 
-		text := renderTextRuns(p.Elements)
+		isHeading := prefix != ""
+		text := renderTextRuns(p.Elements, isHeading)
 
 		// Skip completely empty paragraphs except as blank lines.
 		trimmed := strings.TrimSpace(text)
@@ -169,7 +170,8 @@ func isHorizontalRule(p *docs.Paragraph) bool {
 
 // renderTextRuns converts a slice of ParagraphElements into a Markdown string,
 // applying inline formatting for bold, italic, strikethrough, code, and links.
-func renderTextRuns(elements []*docs.ParagraphElement) string {
+func renderTextRuns(elements []*docs.ParagraphElement, isHeading ...bool) string {
+	stripBold := len(isHeading) > 0 && isHeading[0]
 	var buf strings.Builder
 	for _, elem := range elements {
 		if elem.InlineObjectElement != nil {
@@ -211,7 +213,7 @@ func renderTextRuns(elements []*docs.ParagraphElement) string {
 
 		// Determine formatting wrappers.
 		text := content
-		bold := isBold(ts)
+		bold := isBold(ts) && !stripBold
 		italic := isItalic(ts)
 		strike := isStrikethrough(ts)
 

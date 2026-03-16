@@ -135,7 +135,7 @@ func (b *requestBuilder) applyTextStyle(startIdx, endIdx int64) {
 
 // applyParagraphStyle sets the heading style for a paragraph at the given range.
 func (b *requestBuilder) applyParagraphStyle(startIdx, endIdx int64, namedStyle string) {
-	if namedStyle == "" || namedStyle == StyleNormalText {
+	if namedStyle == "" {
 		return
 	}
 	b.requests = append(b.requests, &docs.Request{
@@ -279,12 +279,19 @@ func (b *requestBuilder) handleHeading(n *ast.Heading, source []byte) error {
 
 // handleParagraph processes a paragraph node.
 func (b *requestBuilder) handleParagraph(node ast.Node, source []byte) error {
+	startIdx := b.cursor
+
 	if err := b.walkChildren(node, source); err != nil {
 		return err
 	}
 
 	// Ensure paragraph ends with a newline.
 	b.insertText("\n")
+	endIdx := b.cursor
+
+	// Explicitly set NORMAL_TEXT so that any pre-existing paragraph style
+	// (e.g. HEADING_1 left over from a previous document body) is cleared.
+	b.applyParagraphStyle(startIdx, endIdx, StyleNormalText)
 	return nil
 }
 

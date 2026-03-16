@@ -226,6 +226,38 @@ func TestToMarkdown_Headings(t *testing.T) {
 	}
 }
 
+func TestToMarkdown_HeadingBoldNotDoubled(t *testing.T) {
+	// Google Docs heading styles inherently set Bold=true on text runs.
+	// The ToMarkdown converter must NOT render this as **text** since
+	// the # prefix already conveys the heading. Without this, headings
+	// render as "# **Heading Text**" which is incorrect markdown.
+	doc := makeDoc(makeParagraph(StyleHeading1, boldRun("My Heading\n")))
+	result, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := string(result)
+	expected := "# My Heading\n\n"
+	if got != expected {
+		t.Errorf("heading with bold text style: got %q, want %q", got, expected)
+	}
+}
+
+func TestToMarkdown_HeadingExplicitItalicPreserved(t *testing.T) {
+	// Italic on headings IS explicit formatting and should be preserved.
+	// Bold+italic on a heading should render as just italic (bold is from style).
+	doc := makeDoc(makeParagraph(StyleHeading1, boldItalicRun("Emphasis Heading\n")))
+	result, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := string(result)
+	expected := "# *Emphasis Heading*\n\n"
+	if got != expected {
+		t.Errorf("heading with bold+italic: got %q, want %q", got, expected)
+	}
+}
+
 func TestToMarkdown_TextFormatting(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -622,6 +654,30 @@ func TestFromMarkdown_CodeBlock(t *testing.T) {
 	}
 	if !hasMono {
 		t.Error("missing monospace UpdateTextStyle for code block")
+	}
+}
+
+func TestFromMarkdown_ParagraphSetsNormalTextStyle(t *testing.T) {
+	md := []byte("Just a plain paragraph.\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// A plain paragraph MUST produce an UpdateParagraphStyle request with
+	// NORMAL_TEXT. Without this, the paragraph inherits whatever style the
+	// Google Doc previously had (e.g. HEADING_1), causing formatting
+	// corruption on round-trip writes.
+	found := false
+	for _, req := range requests {
+		if req.UpdateParagraphStyle != nil &&
+			req.UpdateParagraphStyle.ParagraphStyle.NamedStyleType == StyleNormalText {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("plain paragraph must emit UpdateParagraphStyle with NORMAL_TEXT to prevent style bleeding")
 	}
 }
 
