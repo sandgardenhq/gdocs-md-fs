@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 // syncSafeHandler is a thread-safe Handler for testing the sync loop.
@@ -299,5 +301,27 @@ func TestFileOpen_TruncRegistersDirtyWithServer(t *testing.T) {
 
 	if !ok {
 		t.Error("Open O_TRUNC should register file as dirty with server")
+	}
+}
+
+func TestDirStatfs_ReturnsValidValues(t *testing.T) {
+	d := &Dir{
+		handler: &syncSafeHandler{},
+		cache:   NewCache(),
+		path:    "/",
+		entry:   &Entry{IsDir: true},
+	}
+	var out fuse.StatfsOut
+	errno := d.Statfs(context.Background(), &out)
+	if errno != 0 {
+		t.Fatalf("Statfs returned errno %d", errno)
+	}
+	// Block size should be reasonable.
+	if out.Bsize == 0 {
+		t.Error("Bsize should be non-zero")
+	}
+	// NameLen should allow long filenames.
+	if out.NameLen < 255 {
+		t.Errorf("NameLen: got %d, want >= 255", out.NameLen)
 	}
 }
