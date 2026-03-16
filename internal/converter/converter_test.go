@@ -681,6 +681,50 @@ func TestFromMarkdown_ParagraphSetsNormalTextStyle(t *testing.T) {
 	}
 }
 
+func TestFromMarkdown_ListItemSetsNormalTextStyle(t *testing.T) {
+	md := []byte("- list item\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// List item paragraphs must also emit UpdateParagraphStyle with
+	// NORMAL_TEXT to prevent style bleeding from prior headings.
+	found := false
+	for _, req := range requests {
+		if req.UpdateParagraphStyle != nil &&
+			req.UpdateParagraphStyle.ParagraphStyle.NamedStyleType == StyleNormalText {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("list item must emit UpdateParagraphStyle with NORMAL_TEXT to prevent style bleeding")
+	}
+}
+
+func TestFromMarkdown_BlockquoteSetsNormalTextStyle(t *testing.T) {
+	md := []byte("> quoted text\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Blockquote paragraphs must also emit UpdateParagraphStyle with
+	// NORMAL_TEXT to prevent style bleeding from prior headings.
+	found := false
+	for _, req := range requests {
+		if req.UpdateParagraphStyle != nil &&
+			req.UpdateParagraphStyle.ParagraphStyle.NamedStyleType == StyleNormalText {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("blockquote must emit UpdateParagraphStyle with NORMAL_TEXT to prevent style bleeding")
+	}
+}
+
 func TestFromMarkdown_Empty(t *testing.T) {
 	requests, err := FromMarkdown([]byte(""))
 	if err != nil {

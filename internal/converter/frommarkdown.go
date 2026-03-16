@@ -452,10 +452,12 @@ func (b *requestBuilder) handleListItem(n *ast.ListItem, source []byte) error {
 		switch c := child.(type) {
 		case *ast.Paragraph, *ast.TextBlock:
 			// Walk the paragraph's children directly to avoid double newlines.
+			startIdx := b.cursor
 			if err := b.walkChildren(c, source); err != nil {
 				return err
 			}
 			b.insertText("\n")
+			b.applyParagraphStyle(startIdx, b.cursor, StyleNormalText)
 		default:
 			if err := b.walkNode(child, source); err != nil {
 				return err
@@ -484,10 +486,12 @@ func (b *requestBuilder) handleBlockquote(n *ast.Blockquote, source []byte) erro
 		b.insertText("> ")
 		switch c := child.(type) {
 		case *ast.Paragraph, *ast.TextBlock:
+			startIdx := b.cursor
 			if err := b.walkChildren(c, source); err != nil {
 				return err
 			}
 			b.insertText("\n")
+			b.applyParagraphStyle(startIdx, b.cursor, StyleNormalText)
 		default:
 			if err := b.walkNode(child, source); err != nil {
 				return err
