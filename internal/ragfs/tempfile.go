@@ -72,11 +72,11 @@ func newTempFile(name string, uid, gid uint32) *TempFile {
 func (tf *TempFile) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	tf.mu.Lock()
 	defer tf.mu.Unlock()
-	out.Attr.Mode = syscall.S_IFREG | 0o644
-	out.Attr.Uid = tf.uid
-	out.Attr.Gid = tf.gid
-	out.Attr.Size = uint64(len(tf.data))
-	out.Attr.Mtime = uint64(tf.mod.Unix())
+	out.Mode = syscall.S_IFREG | 0o644
+	out.Uid = tf.uid
+	out.Gid = tf.gid
+	out.Size = uint64(len(tf.data))
+	out.Mtime = uint64(tf.mod.Unix())
 	return fs.OK
 }
 
@@ -91,11 +91,11 @@ func (tf *TempFile) Setattr(_ context.Context, _ fs.FileHandle, in *fuse.SetAttr
 		}
 	}
 	tf.mod = time.Now()
-	out.Attr.Mode = syscall.S_IFREG | 0o644
-	out.Attr.Uid = tf.uid
-	out.Attr.Gid = tf.gid
-	out.Attr.Size = uint64(len(tf.data))
-	out.Attr.Mtime = uint64(tf.mod.Unix())
+	out.Mode = syscall.S_IFREG | 0o644
+	out.Uid = tf.uid
+	out.Gid = tf.gid
+	out.Size = uint64(len(tf.data))
+	out.Mtime = uint64(tf.mod.Unix())
 	return fs.OK
 }
 

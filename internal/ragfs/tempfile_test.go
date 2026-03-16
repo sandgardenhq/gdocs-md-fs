@@ -54,14 +54,14 @@ func TestTempFile_Getattr(t *testing.T) {
 		t.Fatalf("Getattr returned errno %d", errno)
 	}
 	wantMode := uint32(syscall.S_IFREG | 0o644)
-	if out.Attr.Mode != wantMode {
-		t.Errorf("mode: got %o, want %o", out.Attr.Mode, wantMode)
+	if out.Mode != wantMode {
+		t.Errorf("mode: got %o, want %o", out.Mode, wantMode)
 	}
-	if out.Attr.Uid != 501 {
-		t.Errorf("uid: got %d, want 501", out.Attr.Uid)
+	if out.Uid != 501 {
+		t.Errorf("uid: got %d, want 501", out.Uid)
 	}
-	if out.Attr.Gid != 20 {
-		t.Errorf("gid: got %d, want 20", out.Attr.Gid)
+	if out.Gid != 20 {
+		t.Errorf("gid: got %d, want 20", out.Gid)
 	}
 }
 
@@ -173,8 +173,8 @@ func TestTempFile_Setattr_Truncate(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("Setattr returned errno %d", errno)
 	}
-	if out.Attr.Size != 0 {
-		t.Errorf("size after truncate: got %d, want 0", out.Attr.Size)
+	if out.Size != 0 {
+		t.Errorf("size after truncate: got %d, want 0", out.Size)
 	}
 
 	// Read should return empty.
@@ -191,7 +191,7 @@ func TestTempFile_GetattrReflectsSize(t *testing.T) {
 
 	var out fuse.AttrOut
 	_ = tf.Getattr(context.Background(), nil, &out)
-	if out.Attr.Size != 5 {
-		t.Errorf("size: got %d, want 5", out.Attr.Size)
+	if out.Size != 5 {
+		t.Errorf("size: got %d, want 5", out.Size)
 	}
 }

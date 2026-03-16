@@ -23,8 +23,9 @@ type Dir struct {
 	entry   *Entry
 	uid     uint32
 	gid     uint32
-	server  *Server
-	logger  *log.Logger
+	server    *Server
+	logger    *log.Logger
+	tempFiles map[string]*TempFile
 }
 
 // compile-time interface checks
@@ -57,6 +58,17 @@ func (d *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 // Lookup looks up a child entry by name.
 func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	// Check ephemeral temp files first.
+	if tf, ok := d.tempFiles[name]; ok {
+		out.Mode = syscall.S_IFREG | 0o644
+		out.Uid = d.uid
+		out.Gid = d.gid
+		out.Size = uint64(len(tf.data))
+		out.Mtime = uint64(tf.mod.Unix())
+		child := d.NewInode(ctx, tf, fs.StableAttr{Mode: syscall.S_IFREG})
+		return child, fs.OK
+	}
+
 	childPath := path.Join(d.path, name)
 
 	// Try cached directory listing first.
@@ -81,6 +93,21 @@ func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 
 // Create creates a new file in this directory.
 func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	if isTempFile(name) {
+		tf := newTempFile(name, d.uid, d.gid)
+		if d.tempFiles == nil {
+			d.tempFiles = make(map[string]*TempFile)
+		}
+		d.tempFiles[name] = tf
+
+		out.Mode = syscall.S_IFREG | 0o644
+		out.Uid = d.uid
+		out.Gid = d.gid
+
+		child := d.NewInode(ctx, tf, fs.StableAttr{Mode: syscall.S_IFREG})
+		return child, nil, fuse.FOPEN_DIRECT_IO, fs.OK
+	}
+
 	childPath := path.Join(d.path, name)
 
 	entry, err := d.handler.Create(ctx, childPath, false)
@@ -109,6 +136,12 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 
 // Unlink deletes a file from this directory.
 func (d *Dir) Unlink(ctx context.Context, name string) syscall.Errno {
+	// Check ephemeral temp files first.
+	if _, ok := d.tempFiles[name]; ok {
+		delete(d.tempFiles, name)
+		return fs.OK
+	}
+
 	childPath := path.Join(d.path, name)
 
 	if err := d.handler.Delete(ctx, childPath); err != nil {
@@ -128,6 +161,19 @@ func (d *Dir) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 // Rename moves or renames an entry from this directory to another.
 func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	// Renaming temp files stays in-memory.
+	if tf, ok := d.tempFiles[name]; ok {
+		delete(d.tempFiles, name)
+		if newDir, ok := newParent.(*Dir); ok {
+			if newDir.tempFiles == nil {
+				newDir.tempFiles = make(map[string]*TempFile)
+			}
+			tf.name = newName
+			newDir.tempFiles[newName] = tf
+		}
+		return fs.OK
+	}
+
 	oldPath := path.Join(d.path, name)
 
 	newDirNode, ok := newParent.(*Dir)
@@ -162,14 +208,15 @@ func (d *Dir) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.Ent
 	fillAttrOut(entry, &out.Attr, d.uid, d.gid)
 
 	child := d.NewInode(ctx, &Dir{
-		handler: d.handler,
-		cache:   d.cache,
-		path:    childPath,
-		entry:   entry,
-		uid:     d.uid,
-		gid:     d.gid,
-		server:  d.server,
-		logger:  d.logger,
+		handler:   d.handler,
+		cache:     d.cache,
+		path:      childPath,
+		entry:     entry,
+		uid:       d.uid,
+		gid:       d.gid,
+		server:    d.server,
+		logger:    d.logger,
+		tempFiles: make(map[string]*TempFile),
 	}, fs.StableAttr{Mode: syscall.S_IFDIR})
 	return child, fs.OK
 }
@@ -194,14 +241,15 @@ func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *f
 
 	if e.IsDir {
 		return d.NewInode(ctx, &Dir{
-			handler: d.handler,
-			cache:   d.cache,
-			path:    childPath,
-			entry:   e,
-			uid:     d.uid,
-			gid:     d.gid,
-			server:  d.server,
-			logger:  d.logger,
+			handler:   d.handler,
+			cache:     d.cache,
+			path:      childPath,
+			entry:     e,
+			uid:       d.uid,
+			gid:       d.gid,
+			server:    d.server,
+			logger:    d.logger,
+			tempFiles: make(map[string]*TempFile),
 		}, fs.StableAttr{Mode: syscall.S_IFDIR})
 	}
 	return d.NewInode(ctx, &File{
