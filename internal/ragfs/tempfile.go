@@ -88,6 +88,10 @@ func (tf *TempFile) Setattr(_ context.Context, _ fs.FileHandle, in *fuse.SetAttr
 			tf.data = nil
 		} else if sz < uint64(len(tf.data)) {
 			tf.data = tf.data[:sz]
+		} else if sz > uint64(len(tf.data)) {
+			grown := make([]byte, sz)
+			copy(grown, tf.data)
+			tf.data = grown
 		}
 	}
 	tf.mod = time.Now()
@@ -118,7 +122,9 @@ func (tf *TempFile) Read(_ context.Context, _ fs.FileHandle, dest []byte, off in
 	if end > len(tf.data) {
 		end = len(tf.data)
 	}
-	return fuse.ReadResultData(tf.data[off:end]), fs.OK
+	result := make([]byte, end-int(off))
+	copy(result, tf.data[off:end])
+	return fuse.ReadResultData(result), fs.OK
 }
 
 func (tf *TempFile) Write(_ context.Context, _ fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {

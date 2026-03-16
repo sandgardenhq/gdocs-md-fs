@@ -25,6 +25,7 @@ type Dir struct {
 	gid     uint32
 	server    *Server
 	logger    *log.Logger
+	tempMu    sync.RWMutex
 	tempFiles map[string]*TempFile
 }
 
@@ -60,12 +61,17 @@ func (d *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 // Lookup looks up a child entry by name.
 func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	// Check ephemeral temp files first.
-	if tf, ok := d.tempFiles[name]; ok {
+	d.tempMu.RLock()
+	tf, ok := d.tempFiles[name]
+	d.tempMu.RUnlock()
+	if ok {
+		tf.mu.Lock()
 		out.Mode = syscall.S_IFREG | 0o644
 		out.Uid = d.uid
 		out.Gid = d.gid
 		out.Size = uint64(len(tf.data))
 		out.Mtime = uint64(tf.mod.Unix())
+		tf.mu.Unlock()
 		child := d.NewInode(ctx, tf, fs.StableAttr{Mode: syscall.S_IFREG})
 		return child, fs.OK
 	}
@@ -96,10 +102,12 @@ func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	if isTempFile(name) {
 		tf := newTempFile(name, d.uid, d.gid)
+		d.tempMu.Lock()
 		if d.tempFiles == nil {
 			d.tempFiles = make(map[string]*TempFile)
 		}
 		d.tempFiles[name] = tf
+		d.tempMu.Unlock()
 
 		out.Mode = syscall.S_IFREG | 0o644
 		out.Uid = d.uid
@@ -138,8 +146,13 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 // Unlink deletes a file from this directory.
 func (d *Dir) Unlink(ctx context.Context, name string) syscall.Errno {
 	// Check ephemeral temp files first.
-	if _, ok := d.tempFiles[name]; ok {
+	d.tempMu.Lock()
+	_, isTmp := d.tempFiles[name]
+	if isTmp {
 		delete(d.tempFiles, name)
+	}
+	d.tempMu.Unlock()
+	if isTmp {
 		return fs.OK
 	}
 
@@ -163,14 +176,21 @@ func (d *Dir) Rmdir(ctx context.Context, name string) syscall.Errno {
 // Rename moves or renames an entry from this directory to another.
 func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	// Renaming temp files stays in-memory.
-	if tf, ok := d.tempFiles[name]; ok {
+	d.tempMu.Lock()
+	tf, isTmp := d.tempFiles[name]
+	if isTmp {
 		delete(d.tempFiles, name)
+	}
+	d.tempMu.Unlock()
+	if isTmp {
 		if newDir, ok := newParent.(*Dir); ok {
+			newDir.tempMu.Lock()
 			if newDir.tempFiles == nil {
 				newDir.tempFiles = make(map[string]*TempFile)
 			}
 			tf.name = newName
 			newDir.tempFiles[newName] = tf
+			newDir.tempMu.Unlock()
 		}
 		return fs.OK
 	}
