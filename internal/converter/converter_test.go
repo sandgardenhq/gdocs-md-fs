@@ -1854,6 +1854,49 @@ func TestFromMarkdown_GFMTableParsed(t *testing.T) {
 	}
 }
 
+func TestFromMarkdown_TableInsert(t *testing.T) {
+	md := []byte("| A | B |\n| --- | --- |\n| 1 | 2 |\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have an InsertTable request with 2 rows and 2 columns.
+	var hasTable bool
+	for _, req := range requests {
+		if req.InsertTable != nil {
+			if req.InsertTable.Rows == 2 && req.InsertTable.Columns == 2 {
+				hasTable = true
+			}
+		}
+	}
+	if !hasTable {
+		t.Error("missing InsertTable request with 2 rows and 2 columns")
+	}
+}
+
+func TestFromMarkdown_TableCellContent(t *testing.T) {
+	md := []byte("| Name | Age |\n| --- | --- |\n| Alice | 30 |\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Collect all InsertText content to verify cell data is present.
+	var allText strings.Builder
+	for _, req := range requests {
+		if req.InsertText != nil {
+			allText.WriteString(req.InsertText.Text)
+		}
+	}
+	combined := allText.String()
+	for _, want := range []string{"Name", "Age", "Alice", "30"} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("missing cell content %q in: %q", want, combined)
+		}
+	}
+}
+
 func TestFromMarkdown_TextStylesAfterParagraphStyles(t *testing.T) {
 	md := []byte("**bold text**\n")
 	requests, err := FromMarkdown(md)

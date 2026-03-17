@@ -274,6 +274,14 @@ func (b *requestBuilder) walkNode(node ast.Node, source []byte) error {
 	case *ast.Blockquote:
 		return b.handleBlockquote(n, source)
 
+	case *extast.Table:
+		b.handleTable(n, source)
+		return nil
+
+	case *extast.TableHeader, *extast.TableRow, *extast.TableCell:
+		// Handled collectively by handleTable; skip if encountered directly.
+		return nil
+
 	case *extast.Strikethrough:
 		return b.handleStrikethrough(n, source)
 
@@ -539,6 +547,88 @@ func (b *requestBuilder) handleThematicBreak() {
 	// and rely on the caller to handle it, or we can use a special request.
 	// For now, insert the text representation.
 	b.insertText("---\n")
+}
+
+// collectTableData extracts cell text content from a goldmark Table AST node
+// into a 2D string grid. The header row is included as the first row.
+func (b *requestBuilder) collectTableData(table ast.Node, source []byte) [][]string {
+	var rows [][]string
+	for row := table.FirstChild(); row != nil; row = row.NextSibling() {
+		var cells []string
+		for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
+			var cellBuf strings.Builder
+			b.collectCellText(cell, source, &cellBuf)
+			cells = append(cells, cellBuf.String())
+		}
+		if len(cells) > 0 {
+			rows = append(rows, cells)
+		}
+	}
+	return rows
+}
+
+// collectCellText recursively collects text content from a table cell's children.
+func (b *requestBuilder) collectCellText(node ast.Node, source []byte, buf *strings.Builder) {
+	for child := node.FirstChild(); child != nil; child = child.NextSibling() {
+		if t, ok := child.(*ast.Text); ok {
+			buf.Write(t.Segment.Value(source))
+		} else {
+			// Recurse into inline elements (emphasis, code span, etc.).
+			b.collectCellText(child, source, buf)
+		}
+	}
+}
+
+// handleTable processes a GFM table node and emits InsertTable + cell content requests.
+func (b *requestBuilder) handleTable(table ast.Node, source []byte) {
+	data := b.collectTableData(table, source)
+	if len(data) == 0 {
+		return
+	}
+	numRows := len(data)
+	numCols := len(data[0])
+	if numCols == 0 {
+		return
+	}
+
+	// InsertTable at the current cursor position.
+	b.requests = append(b.requests, &docs.Request{
+		InsertTable: &docs.InsertTableRequest{
+			Location: &docs.Location{Index: b.cursor},
+			Rows:     int64(numRows),
+			Columns:  int64(numCols),
+		},
+	})
+
+	// The InsertTable API inserts a newline before the table.
+	// Table body starts at cursor + 2.
+	// Each cell occupies 2 index units (paragraph start + newline).
+	// Each row has an additional 1 index unit overhead for the row boundary.
+	// Cell (r, c) paragraph start = tableBodyStart + r*(numCols*2+1) + c*2
+	tableBodyStart := b.cursor + 2
+
+	for r, row := range data {
+		for c := 0; c < numCols; c++ {
+			cellStart := tableBodyStart + int64(r)*(int64(numCols)*2+1) + int64(c)*2
+			text := ""
+			if c < len(row) {
+				text = row[c]
+			}
+			if text != "" {
+				b.requests = append(b.requests, &docs.Request{
+					InsertText: &docs.InsertTextRequest{
+						Location: &docs.Location{Index: cellStart},
+						Text:     text,
+					},
+				})
+			}
+		}
+	}
+
+	// Advance cursor past the entire table.
+	// Total: 1 (auto newline) + 1 (table start) + numRows*(numCols*2+1) + 1 (trailing newline)
+	totalSize := int64(2 + numRows*(numCols*2+1) + 1)
+	b.cursor += totalSize
 }
 
 // handleBlockquote processes a blockquote. Google Docs doesn't have native
