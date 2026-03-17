@@ -66,7 +66,7 @@ func (b *requestBuilder) insertText(s string) {
 			Text:     s,
 		},
 	})
-	b.cursor += int64(len([]rune(s)))
+	b.cursor += int64(utf16CodeUnits(s))
 	endIdx := b.cursor
 
 	// Apply accumulated inline styles.
@@ -87,6 +87,21 @@ func (b *requestBuilder) insertText(s string) {
 			},
 		})
 	}
+}
+
+// utf16CodeUnits returns the number of UTF-16 code units needed to encode s.
+// The Google Docs API uses UTF-16 indices, so characters above U+FFFF (such
+// as emoji) require 2 code units (a surrogate pair) instead of 1.
+func utf16CodeUnits(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= 0x10000 {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
 }
 
 // applyTextStyle appends UpdateTextStyle requests for any active inline styles.

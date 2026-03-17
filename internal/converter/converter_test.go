@@ -725,6 +725,94 @@ func TestFromMarkdown_BlockquoteSetsNormalTextStyle(t *testing.T) {
 	}
 }
 
+func TestFromMarkdown_EmojiUTF16Indices(t *testing.T) {
+	// Emojis like 🤷 (U+1F937) are 1 Go rune but 2 UTF-16 code units.
+	// The Google Docs API uses UTF-16 indices. If the cursor counts runes
+	// instead of UTF-16 code units, insertion indices after an emoji will
+	// be wrong, causing "insertion index within grapheme cluster" errors.
+	md := []byte("Hello 🤷 world\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Collect all InsertText requests and verify indices are sequential
+	// using UTF-16 counting. "Hello 🤷 world\n" in UTF-16:
+	//   H(1) e(1) l(1) l(1) o(1) (1) 🤷(2) (1) w(1) o(1) r(1) l(1) d(1) \n(1)
+	//   = 6 + 2 + 1 + 5 + 1 = 15 UTF-16 code units
+	// Starting at index 1, the final cursor should be 1 + 15 = 16.
+	var maxEnd int64
+	for _, req := range requests {
+		if req.InsertText != nil {
+			idx := req.InsertText.Location.Index
+			textLen := utf16Len(req.InsertText.Text)
+			end := idx + int64(textLen)
+			if end > maxEnd {
+				maxEnd = end
+			}
+		}
+		// Check that style ranges don't split a surrogate pair.
+		if req.UpdateTextStyle != nil && req.UpdateTextStyle.Range != nil {
+			r := req.UpdateTextStyle.Range
+			if r.StartIndex < 0 || r.EndIndex < r.StartIndex {
+				t.Errorf("invalid text style range: [%d, %d)", r.StartIndex, r.EndIndex)
+			}
+		}
+		if req.UpdateParagraphStyle != nil && req.UpdateParagraphStyle.Range != nil {
+			r := req.UpdateParagraphStyle.Range
+			if r.StartIndex < 0 || r.EndIndex < r.StartIndex {
+				t.Errorf("invalid paragraph style range: [%d, %d)", r.StartIndex, r.EndIndex)
+			}
+		}
+	}
+
+	// The final cursor position must account for UTF-16 surrogate pairs.
+	// With rune counting, cursor would be 1+14=15 (wrong).
+	// With UTF-16 counting, cursor would be 1+15=16 (correct).
+	if maxEnd != 16 {
+		t.Errorf("final cursor position: got %d, want 16 (UTF-16 code units from index 1)", maxEnd)
+	}
+}
+
+// utf16Len returns the number of UTF-16 code units needed to encode s.
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= 0x10000 {
+			n += 2 // surrogate pair
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+func TestFromMarkdown_MultipleEmojis(t *testing.T) {
+	// Multiple emojis in sequence to verify cursor accumulation.
+	md := []byte("🎉🎊🎈\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Each emoji is 2 UTF-16 code units. 3 emojis + \n = 7 UTF-16 units.
+	// Starting at index 1, final cursor should be 8.
+	var maxEnd int64
+	for _, req := range requests {
+		if req.InsertText != nil {
+			idx := req.InsertText.Location.Index
+			textLen := utf16Len(req.InsertText.Text)
+			end := idx + int64(textLen)
+			if end > maxEnd {
+				maxEnd = end
+			}
+		}
+	}
+	if maxEnd != 8 {
+		t.Errorf("final cursor position: got %d, want 8 (3 emojis * 2 + \\n + start=1)", maxEnd)
+	}
+}
+
 func TestFromMarkdown_Empty(t *testing.T) {
 	requests, err := FromMarkdown([]byte(""))
 	if err != nil {
