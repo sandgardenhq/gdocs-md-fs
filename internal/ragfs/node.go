@@ -176,22 +176,24 @@ func (d *Dir) Rmdir(ctx context.Context, name string) syscall.Errno {
 // Rename moves or renames an entry from this directory to another.
 func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	// Renaming temp files stays in-memory.
-	d.tempMu.Lock()
+	d.tempMu.RLock()
 	tf, isTmp := d.tempFiles[name]
+	d.tempMu.RUnlock()
 	if isTmp {
-		delete(d.tempFiles, name)
-	}
-	d.tempMu.Unlock()
-	if isTmp {
-		if newDir, ok := newParent.(*Dir); ok {
-			newDir.tempMu.Lock()
-			if newDir.tempFiles == nil {
-				newDir.tempFiles = make(map[string]*TempFile)
-			}
-			tf.name = newName
-			newDir.tempFiles[newName] = tf
-			newDir.tempMu.Unlock()
+		newDir, ok := newParent.(*Dir)
+		if !ok {
+			return syscall.EIO
 		}
+		d.tempMu.Lock()
+		delete(d.tempFiles, name)
+		d.tempMu.Unlock()
+		newDir.tempMu.Lock()
+		if newDir.tempFiles == nil {
+			newDir.tempFiles = make(map[string]*TempFile)
+		}
+		tf.name = newName
+		newDir.tempFiles[newName] = tf
+		newDir.tempMu.Unlock()
 		return fs.OK
 	}
 

@@ -1101,13 +1101,37 @@ func TestFileOpen_ConcurrentWriteAndOpen_NoRace(t *testing.T) {
 	<-done
 }
 
-func TestDirCreate_TempFile_SkipsHandler(t *testing.T) {
-	h := &stubHandler{
-		createEntry: &Entry{
-			Name:     "should-not-be-called",
-			MimeType: mimeGoogleDoc,
-		},
+
+func TestDirUnlink_TempFile_RemovesFromMap(t *testing.T) {
+	d := &Dir{
+		handler:   &stubHandler{},
+		cache:     NewCache(),
+		path:      "/",
+		entry:     &Entry{IsDir: true},
+		uid:       501,
+		gid:       20,
+		tempFiles: make(map[string]*TempFile),
 	}
+
+	tf := newTempFile("doc.md~", 501, 20)
+	d.tempFiles["doc.md~"] = tf
+
+	// Call the actual production Unlink method.
+	errno := d.Unlink(context.Background(), "doc.md~")
+	if errno != 0 {
+		t.Fatalf("Unlink returned errno %d", errno)
+	}
+
+	d.tempMu.RLock()
+	_, ok := d.tempFiles["doc.md~"]
+	d.tempMu.RUnlock()
+	if ok {
+		t.Error("temp file should be removed after Unlink")
+	}
+}
+
+func TestDirUnlink_TempFile_DoesNotCallHandler(t *testing.T) {
+	h := &stubHandler{}
 	d := &Dir{
 		handler:   h,
 		cache:     NewCache(),
@@ -1118,19 +1142,66 @@ func TestDirCreate_TempFile_SkipsHandler(t *testing.T) {
 		tempFiles: make(map[string]*TempFile),
 	}
 
-	// Create should NOT call handler for temp files.
-	// We can't easily test Create because it calls NewInode which requires
-	// a mounted filesystem. Instead, test the routing logic directly.
-	if !isTempFile("doc.md~") {
-		t.Fatal("doc.md~ should be a temp file")
+	tf := newTempFile("doc.md~", 501, 20)
+	d.tempFiles["doc.md~"] = tf
+
+	errno := d.Unlink(context.Background(), "doc.md~")
+	if errno != 0 {
+		t.Fatalf("Unlink returned errno %d", errno)
 	}
-	if isTempFile("doc.md") {
-		t.Fatal("doc.md should not be a temp file")
-	}
-	_ = d // ensure Dir compiles with tempFiles field
+	// handler.Delete should NOT be called for temp files.
+	// stubHandler.Delete returns an error, so if it were called Unlink would return EIO.
 }
 
-func TestDirLookup_FindsTempFile(t *testing.T) {
+func TestDirRename_TempFile_MovesToNewDir(t *testing.T) {
+	srcDir := &Dir{
+		handler:   &stubHandler{},
+		cache:     NewCache(),
+		path:      "/src",
+		entry:     &Entry{IsDir: true},
+		uid:       501,
+		gid:       20,
+		tempFiles: make(map[string]*TempFile),
+	}
+	dstDir := &Dir{
+		handler:   &stubHandler{},
+		cache:     NewCache(),
+		path:      "/dst",
+		entry:     &Entry{IsDir: true},
+		uid:       501,
+		gid:       20,
+		tempFiles: make(map[string]*TempFile),
+	}
+
+	tf := newTempFile("doc.md~", 501, 20)
+	srcDir.tempFiles["doc.md~"] = tf
+
+	errno := srcDir.Rename(context.Background(), "doc.md~", dstDir, "renamed.md~", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d", errno)
+	}
+
+	// Should be removed from source.
+	srcDir.tempMu.RLock()
+	_, inSrc := srcDir.tempFiles["doc.md~"]
+	srcDir.tempMu.RUnlock()
+	if inSrc {
+		t.Error("temp file should be removed from source dir")
+	}
+
+	// Should appear in destination.
+	dstDir.tempMu.RLock()
+	moved, inDst := dstDir.tempFiles["renamed.md~"]
+	dstDir.tempMu.RUnlock()
+	if !inDst {
+		t.Fatal("temp file should be in destination dir")
+	}
+	if moved != tf {
+		t.Error("destination should contain the same TempFile pointer")
+	}
+}
+
+func TestDirRename_TempFile_BadParent_ReturnsError(t *testing.T) {
 	d := &Dir{
 		handler:   &stubHandler{},
 		cache:     NewCache(),
@@ -1140,36 +1211,22 @@ func TestDirLookup_FindsTempFile(t *testing.T) {
 		gid:       20,
 		tempFiles: make(map[string]*TempFile),
 	}
-
-	// Add a temp file to the map.
 	tf := newTempFile("doc.md~", 501, 20)
 	d.tempFiles["doc.md~"] = tf
 
-	// Lookup should find it without calling handler.
-	// (Can't test full Lookup without mounted filesystem, so we verify the map.)
-	if _, ok := d.tempFiles["doc.md~"]; !ok {
-		t.Error("temp file should be in the map")
-	}
-}
-
-func TestDirUnlink_RemovesTempFile(t *testing.T) {
-	d := &Dir{
-		handler:   &stubHandler{},
-		cache:     NewCache(),
-		path:      "/",
-		entry:     &Entry{IsDir: true},
-		uid:       501,
-		gid:       20,
-		tempFiles: make(map[string]*TempFile),
+	// Use a non-Dir InodeEmbedder as newParent.
+	badParent := &File{}
+	errno := d.Rename(context.Background(), "doc.md~", badParent, "renamed.md~", 0)
+	if errno != syscall.EIO {
+		t.Errorf("Rename with bad parent: got errno %d, want EIO (%d)", errno, syscall.EIO)
 	}
 
-	tf := newTempFile("doc.md~", 501, 20)
-	d.tempFiles["doc.md~"] = tf
-
-	// After removing from the map, it should be gone.
-	delete(d.tempFiles, "doc.md~")
-	if _, ok := d.tempFiles["doc.md~"]; ok {
-		t.Error("temp file should be removed from the map")
+	// The temp file must NOT be lost.
+	d.tempMu.RLock()
+	_, ok := d.tempFiles["doc.md~"]
+	d.tempMu.RUnlock()
+	if !ok {
+		t.Error("temp file should be preserved in source when rename fails")
 	}
 }
 
