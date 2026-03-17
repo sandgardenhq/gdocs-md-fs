@@ -613,14 +613,21 @@ func (b *requestBuilder) handleTable(table ast.Node, source []byte) {
 	// Each cell occupies 2 index units (paragraph start + newline).
 	// Each row has an additional 1 index unit overhead for the row boundary.
 	// Cell (r, c) paragraph start = tableBodyStart + r*(numCols*2+1) + c*2
+	//
+	// Cells are inserted in REVERSE order (last cell first) because the
+	// Google Docs batchUpdate API processes requests sequentially — inserting
+	// text into an earlier cell shifts all subsequent indices. By going in
+	// reverse, each insertion only affects higher indices that have already
+	// been populated.
 	tableBodyStart := b.cursor + 2
 
-	for r, row := range data {
-		for c := 0; c < numCols; c++ {
+	var totalCellText int64
+	for r := numRows - 1; r >= 0; r-- {
+		for c := numCols - 1; c >= 0; c-- {
 			cellStart := tableBodyStart + int64(r)*(int64(numCols)*2+1) + int64(c)*2
 			text := ""
-			if c < len(row) {
-				text = row[c]
+			if c < len(data[r]) {
+				text = data[r][c]
 			}
 			if text != "" {
 				b.requests = append(b.requests, &docs.Request{
@@ -629,13 +636,14 @@ func (b *requestBuilder) handleTable(table ast.Node, source []byte) {
 						Text:     text,
 					},
 				})
+				totalCellText += int64(len(text))
 			}
 		}
 	}
 
-	// Advance cursor past the entire table.
-	// Total: 1 (auto newline) + 1 (table start) + numRows*(numCols*2+1) + 1 (trailing newline)
-	totalSize := int64(2 + numRows*(numCols*2+1) + 1)
+	// Advance cursor past the entire table, including inserted cell text.
+	// Structure: 1 (auto newline) + 1 (table start) + numRows*(numCols*2+1) + 1 (trailing newline)
+	totalSize := int64(2+numRows*(numCols*2+1)+1) + totalCellText
 	b.cursor += totalSize
 }
 

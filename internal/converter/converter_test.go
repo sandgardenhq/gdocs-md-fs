@@ -1948,6 +1948,72 @@ func TestFromMarkdown_TableCellContent(t *testing.T) {
 	}
 }
 
+func TestFromMarkdown_TableCellIndicesReverseOrder(t *testing.T) {
+	// Table cells must be inserted in reverse order so that earlier insertions
+	// don't shift the pre-computed indices of later cells.
+	md := []byte("| Name | Age |\n| --- | --- |\n| Alice | 30 |\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Collect cell InsertText requests (those that come after InsertTable).
+	var cellInserts []*docs.InsertTextRequest
+	pastTable := false
+	for _, req := range requests {
+		if req.InsertTable != nil {
+			pastTable = true
+			continue
+		}
+		if pastTable && req.InsertText != nil {
+			cellInserts = append(cellInserts, req.InsertText)
+		}
+	}
+
+	if len(cellInserts) < 2 {
+		t.Fatalf("expected at least 2 cell InsertText requests, got %d", len(cellInserts))
+	}
+
+	// Cell InsertText requests must be in descending index order so that
+	// each insertion doesn't shift the indices of subsequent (lower-index) cells.
+	for i := 1; i < len(cellInserts); i++ {
+		if cellInserts[i].Location.Index >= cellInserts[i-1].Location.Index {
+			t.Errorf("cell InsertText[%d] index %d >= InsertText[%d] index %d; must be in descending order",
+				i, cellInserts[i].Location.Index, i-1, cellInserts[i-1].Location.Index)
+		}
+	}
+}
+
+func TestFromMarkdown_TableCursorAdvancesCorrectly(t *testing.T) {
+	// After a table, the cursor must account for both the table structure
+	// and the text inserted into cells.
+	// 2x2 table with cells "A","B","1","2" (4 chars total).
+	// Empty table structure at cursor=1: 2 + 2*(2*2+1) + 1 = 13 index units.
+	// Total table footprint: 13 + 4 = 17. So cursor after table = 1 + 17 = 18.
+	md := []byte("| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfterX\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the InsertText containing "AfterX" — it should start at index 18.
+	var afterTableIdx int64 = -1
+	for _, req := range requests {
+		if req.InsertText != nil && strings.Contains(req.InsertText.Text, "AfterX") {
+			afterTableIdx = req.InsertText.Location.Index
+			break
+		}
+	}
+
+	if afterTableIdx == -1 {
+		t.Fatal("missing InsertText for 'AfterX'")
+	}
+	// Expected: cursor starts at 1, table structure = 13, cell text = 4, total = 18.
+	if afterTableIdx != 18 {
+		t.Errorf("'AfterX' index = %d, want 18 (1 + 13 structure + 4 cell text)", afterTableIdx)
+	}
+}
+
 func TestFromMarkdown_FormattingRequestOrder(t *testing.T) {
 	tests := []struct {
 		name       string
