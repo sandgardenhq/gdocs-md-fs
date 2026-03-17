@@ -1854,6 +1854,35 @@ func TestFromMarkdown_GFMTableParsed(t *testing.T) {
 	}
 }
 
+func TestToMarkdown_TaskList(t *testing.T) {
+	doc := makeDocWithLists(
+		map[string]docs.List{
+			"list1": {
+				ListProperties: &docs.ListProperties{
+					NestingLevels: []*docs.NestingLevel{
+						{GlyphType: "GLYPH_TYPE_UNSPECIFIED"},
+					},
+				},
+			},
+		},
+		makeListParagraph("list1", 0, textRun("☑ done task\n")),
+		makeListParagraph("list1", 0, textRun("☐ pending task\n")),
+	)
+
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := string(md)
+	if !strings.Contains(got, "- [x] done task") {
+		t.Errorf("expected checked task list item, got:\n%s", got)
+	}
+	if !strings.Contains(got, "- [ ] pending task") {
+		t.Errorf("expected unchecked task list item, got:\n%s", got)
+	}
+}
+
 func TestFromMarkdown_TaskList(t *testing.T) {
 	md := []byte("- [x] done\n- [ ] todo\n")
 	requests, err := FromMarkdown(md)
