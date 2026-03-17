@@ -282,6 +282,14 @@ func (b *requestBuilder) walkNode(node ast.Node, source []byte) error {
 		// Handled collectively by handleTable; skip if encountered directly.
 		return nil
 
+	case *extast.TaskCheckBox:
+		if n.IsChecked {
+			b.insertText("☑ ")
+		} else {
+			b.insertText("☐ ")
+		}
+		return nil
+
 	case *extast.Strikethrough:
 		return b.handleStrikethrough(n, source)
 

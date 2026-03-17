@@ -1854,6 +1854,28 @@ func TestFromMarkdown_GFMTableParsed(t *testing.T) {
 	}
 }
 
+func TestFromMarkdown_TaskList(t *testing.T) {
+	md := []byte("- [x] done\n- [ ] todo\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var allText strings.Builder
+	for _, req := range requests {
+		if req.InsertText != nil {
+			allText.WriteString(req.InsertText.Text)
+		}
+	}
+	combined := allText.String()
+	if !strings.Contains(combined, "☑") {
+		t.Errorf("missing checked checkbox (☑) in: %q", combined)
+	}
+	if !strings.Contains(combined, "☐") {
+		t.Errorf("missing unchecked checkbox (☐) in: %q", combined)
+	}
+}
+
 func TestFromMarkdown_TableInsert(t *testing.T) {
 	md := []byte("| A | B |\n| --- | --- |\n| 1 | 2 |\n")
 	requests, err := FromMarkdown(md)
