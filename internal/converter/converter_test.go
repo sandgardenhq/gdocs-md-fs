@@ -1948,6 +1948,89 @@ func TestFromMarkdown_TableCellContent(t *testing.T) {
 	}
 }
 
+func TestFromMarkdown_FormattingRequestOrder(t *testing.T) {
+	tests := []struct {
+		name       string
+		md         string
+		wantBold   bool
+		wantItalic bool
+		wantStrike bool
+		wantCode   bool
+	}{
+		{"bold", "**bold**\n", true, false, false, false},
+		{"italic", "*italic*\n", false, true, false, false},
+		{"bold+italic", "***both***\n", true, true, false, false},
+		{"strikethrough", "~~strike~~\n", false, false, true, false},
+		{"inline code", "`code`\n", false, false, false, true},
+		{"mixed", "**bold** and *italic*\n", true, true, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests, err := FromMarkdown([]byte(tt.md))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// Verify ordering: all InsertText before all UpdateParagraphStyle before all UpdateTextStyle.
+			phase := 0 // 0=inserts, 1=paraStyles, 2=textStyles
+			for _, req := range requests {
+				switch {
+				case req.InsertText != nil:
+					if phase > 0 {
+						t.Errorf("InsertText found after style requests")
+					}
+				case req.UpdateParagraphStyle != nil:
+					if phase > 1 {
+						t.Errorf("UpdateParagraphStyle found after UpdateTextStyle")
+					}
+					if phase == 0 {
+						phase = 1
+					}
+				case req.UpdateTextStyle != nil:
+					if phase < 2 {
+						phase = 2
+					}
+				}
+			}
+
+			var hasBold, hasItalic, hasStrike, hasCode bool
+			for _, req := range requests {
+				if req.UpdateTextStyle == nil {
+					continue
+				}
+				ts := req.UpdateTextStyle.TextStyle
+				fields := req.UpdateTextStyle.Fields
+				if ts.Bold && strings.Contains(fields, "bold") {
+					hasBold = true
+				}
+				if ts.Italic && strings.Contains(fields, "italic") {
+					hasItalic = true
+				}
+				if ts.Strikethrough && strings.Contains(fields, "strikethrough") {
+					hasStrike = true
+				}
+				if ts.WeightedFontFamily != nil && strings.Contains(fields, "weightedFontFamily") {
+					hasCode = true
+				}
+			}
+
+			if tt.wantBold && !hasBold {
+				t.Error("expected bold style request")
+			}
+			if tt.wantItalic && !hasItalic {
+				t.Error("expected italic style request")
+			}
+			if tt.wantStrike && !hasStrike {
+				t.Error("expected strikethrough style request")
+			}
+			if tt.wantCode && !hasCode {
+				t.Error("expected code (monospace) style request")
+			}
+		})
+	}
+}
+
 func TestFromMarkdown_TextStylesAfterParagraphStyles(t *testing.T) {
 	md := []byte("**bold text**\n")
 	requests, err := FromMarkdown(md)
