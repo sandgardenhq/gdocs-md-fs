@@ -1230,6 +1230,84 @@ func TestDirRename_TempFile_BadParent_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestDirRename_TempToNonTemp_WritesToBackend(t *testing.T) {
+	h := &stubHandler{}
+	d := &Dir{
+		handler:   h,
+		cache:     NewCache(),
+		path:      "/",
+		entry:     &Entry{IsDir: true},
+		uid:       501,
+		gid:       20,
+		tempFiles: make(map[string]*TempFile),
+	}
+
+	// Create a temp file with content (simulates editor writing to temp).
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	tf.data = []byte("# Saved content\n")
+	d.tempFiles[".doc.md.tmp"] = tf
+
+	// Rename temp file to a real filename (atomic save pattern).
+	errno := d.Rename(context.Background(), ".doc.md.tmp", d, "doc.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d", errno)
+	}
+
+	// handler.Write should have been called to sync content to backend.
+	if !h.writeCalled {
+		t.Error("Rename temp→non-temp should call handler.Write to sync content")
+	}
+	if string(h.lastWritten) != "# Saved content\n" {
+		t.Errorf("handler.Write got %q, want %q", h.lastWritten, "# Saved content\n")
+	}
+
+	// Temp file should be removed from the map.
+	d.tempMu.RLock()
+	_, inSrc := d.tempFiles[".doc.md.tmp"]
+	d.tempMu.RUnlock()
+	if inSrc {
+		t.Error("temp file should be removed from source after rename")
+	}
+
+	// The new name should NOT be stored as a temp file.
+	d.tempMu.RLock()
+	_, inDst := d.tempFiles["doc.md"]
+	d.tempMu.RUnlock()
+	if inDst {
+		t.Error("renamed file should not be stored as temp file")
+	}
+}
+
+func TestDirRename_TempToNonTemp_InvalidatesCache(t *testing.T) {
+	h := &stubHandler{}
+	cache := NewCache()
+	cache.PutContent("/doc.md", []byte("# Old cached content\n"))
+	d := &Dir{
+		handler:   h,
+		cache:     cache,
+		path:      "/",
+		entry:     &Entry{IsDir: true},
+		uid:       501,
+		gid:       20,
+		tempFiles: make(map[string]*TempFile),
+	}
+
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	tf.data = []byte("# New content\n")
+	d.tempFiles[".doc.md.tmp"] = tf
+
+	errno := d.Rename(context.Background(), ".doc.md.tmp", d, "doc.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d", errno)
+	}
+
+	// Cache for the destination path should be invalidated so next read
+	// fetches the freshly-written content from the backend.
+	if cache.GetContent("/doc.md") != nil {
+		t.Error("cache for destination path should be invalidated after temp→non-temp rename")
+	}
+}
+
 func TestCreateFuseFlags_IncludesDirectIO(t *testing.T) {
 	// Dir.Create returns fuseFlags as the third return value.
 	// It must include FOPEN_DIRECT_IO so the kernel bypasses

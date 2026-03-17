@@ -175,7 +175,8 @@ func (d *Dir) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 // Rename moves or renames an entry from this directory to another.
 func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	// Renaming temp files stays in-memory.
+	// Renaming temp files stays in-memory, unless the destination is a
+	// non-temp name (e.g., editor atomic save: write .tmp → rename to .md).
 	d.tempMu.RLock()
 	tf, isTmp := d.tempFiles[name]
 	d.tempMu.RUnlock()
@@ -184,6 +185,30 @@ func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 		if !ok {
 			return syscall.EIO
 		}
+		if !isTempFile(newName) {
+			// Promote: write temp content to the backend so it syncs.
+			tf.mu.Lock()
+			data := make([]byte, len(tf.data))
+			copy(data, tf.data)
+			tf.mu.Unlock()
+
+			newPath := path.Join(newDir.path, newName)
+			if err := d.handler.Write(ctx, newPath, data); err != nil {
+				return syscall.EIO
+			}
+
+			d.tempMu.Lock()
+			delete(d.tempFiles, name)
+			d.tempMu.Unlock()
+
+			d.cache.Invalidate(d.path)
+			d.cache.Invalidate(newPath)
+			if newDir != d {
+				newDir.cache.Invalidate(newDir.path)
+			}
+			return fs.OK
+		}
+		// Temp-to-temp rename stays in-memory.
 		d.tempMu.Lock()
 		delete(d.tempFiles, name)
 		d.tempMu.Unlock()
