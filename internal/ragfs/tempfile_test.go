@@ -195,3 +195,72 @@ func TestTempFile_GetattrReflectsSize(t *testing.T) {
 		t.Errorf("size: got %d, want 5", out.Size)
 	}
 }
+
+func TestTempFile_Setattr_ShrinkData(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	_, _ = tf.Write(context.Background(), nil, []byte("hello world"), 0)
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 5
+	var out fuse.AttrOut
+	errno := tf.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+	if out.Size != 5 {
+		t.Errorf("size after shrink: got %d, want 5", out.Size)
+	}
+}
+
+func TestTempFile_Setattr_GrowData(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	_, _ = tf.Write(context.Background(), nil, []byte("hi"), 0)
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 10
+	var out fuse.AttrOut
+	errno := tf.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+	if out.Size != 10 {
+		t.Errorf("size after grow: got %d, want 10", out.Size)
+	}
+}
+
+func TestTempFile_Open_WithTrunc(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	_, _ = tf.Write(context.Background(), nil, []byte("content"), 0)
+
+	_, flags, errno := tf.Open(context.Background(), syscall.O_TRUNC)
+	if errno != 0 {
+		t.Fatalf("Open returned errno %d", errno)
+	}
+	if flags&fuse.FOPEN_DIRECT_IO == 0 {
+		t.Error("Open should return FOPEN_DIRECT_IO")
+	}
+	// After O_TRUNC, data should be nil.
+	tf.mu.Lock()
+	if tf.data != nil {
+		t.Errorf("data after O_TRUNC: got %v, want nil", tf.data)
+	}
+	tf.mu.Unlock()
+}
+
+func TestTempFile_Setattr_NoSize(t *testing.T) {
+	tf := newTempFile("doc.md~", 501, 20)
+	_, _ = tf.Write(context.Background(), nil, []byte("keep"), 0)
+
+	in := &fuse.SetAttrIn{}
+	// No FATTR_SIZE set — data should remain unchanged.
+	var out fuse.AttrOut
+	errno := tf.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+	if out.Size != 4 {
+		t.Errorf("size: got %d, want 4", out.Size)
+	}
+}

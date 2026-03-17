@@ -55,6 +55,7 @@ type requestBuilder struct {
 // advances the cursor. It also applies any pending inline styles to the
 // inserted range.
 func (b *requestBuilder) insertText(s string) {
+	s = sanitizeForDocs(s)
 	if s == "" {
 		return
 	}
@@ -66,7 +67,7 @@ func (b *requestBuilder) insertText(s string) {
 			Text:     s,
 		},
 	})
-	b.cursor += int64(len([]rune(s)))
+	b.cursor += int64(utf16CodeUnits(s))
 	endIdx := b.cursor
 
 	// Apply accumulated inline styles.
@@ -87,6 +88,44 @@ func (b *requestBuilder) insertText(s string) {
 			},
 		})
 	}
+}
+
+// utf16CodeUnits returns the number of UTF-16 code units needed to encode s.
+// The Google Docs API uses UTF-16 indices, so characters above U+FFFF (such
+// as emoji) require 2 code units (a surrogate pair) instead of 1.
+func utf16CodeUnits(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= 0x10000 {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+// sanitizeForDocs strips characters that the Google Docs API rejects:
+// null bytes, C0/C1 control characters (except tab, newline, carriage return),
+// DEL, and replaces invalid UTF-8 sequences with U+FFFD.
+func sanitizeForDocs(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t', r == '\n', r == '\r':
+			b.WriteRune(r)
+		case r < 0x20: // C0 control characters (includes null)
+			continue
+		case r == 0x7F: // DEL
+			continue
+		case r >= 0x80 && r <= 0x9F: // C1 control characters
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // applyTextStyle appends UpdateTextStyle requests for any active inline styles.

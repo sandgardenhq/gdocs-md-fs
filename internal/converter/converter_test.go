@@ -725,6 +725,273 @@ func TestFromMarkdown_BlockquoteSetsNormalTextStyle(t *testing.T) {
 	}
 }
 
+func TestFromMarkdown_EmojiUTF16Indices(t *testing.T) {
+	// Emojis like 🤷 (U+1F937) are 1 Go rune but 2 UTF-16 code units.
+	// The Google Docs API uses UTF-16 indices. If the cursor counts runes
+	// instead of UTF-16 code units, insertion indices after an emoji will
+	// be wrong, causing "insertion index within grapheme cluster" errors.
+	md := []byte("Hello 🤷 world\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Collect all InsertText requests and verify indices are sequential
+	// using UTF-16 counting. "Hello 🤷 world\n" in UTF-16:
+	//   H(1) e(1) l(1) l(1) o(1) (1) 🤷(2) (1) w(1) o(1) r(1) l(1) d(1) \n(1)
+	//   = 6 + 2 + 1 + 5 + 1 = 15 UTF-16 code units
+	// Starting at index 1, the final cursor should be 1 + 15 = 16.
+	var maxEnd int64
+	for _, req := range requests {
+		if req.InsertText != nil {
+			idx := req.InsertText.Location.Index
+			textLen := utf16Len(req.InsertText.Text)
+			end := idx + int64(textLen)
+			if end > maxEnd {
+				maxEnd = end
+			}
+		}
+		// Check that style ranges don't split a surrogate pair.
+		if req.UpdateTextStyle != nil && req.UpdateTextStyle.Range != nil {
+			r := req.UpdateTextStyle.Range
+			if r.StartIndex < 0 || r.EndIndex < r.StartIndex {
+				t.Errorf("invalid text style range: [%d, %d)", r.StartIndex, r.EndIndex)
+			}
+		}
+		if req.UpdateParagraphStyle != nil && req.UpdateParagraphStyle.Range != nil {
+			r := req.UpdateParagraphStyle.Range
+			if r.StartIndex < 0 || r.EndIndex < r.StartIndex {
+				t.Errorf("invalid paragraph style range: [%d, %d)", r.StartIndex, r.EndIndex)
+			}
+		}
+	}
+
+	// The final cursor position must account for UTF-16 surrogate pairs.
+	// With rune counting, cursor would be 1+14=15 (wrong).
+	// With UTF-16 counting, cursor would be 1+15=16 (correct).
+	if maxEnd != 16 {
+		t.Errorf("final cursor position: got %d, want 16 (UTF-16 code units from index 1)", maxEnd)
+	}
+}
+
+// utf16Len returns the number of UTF-16 code units needed to encode s.
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= 0x10000 {
+			n += 2 // surrogate pair
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+func TestFromMarkdown_MultipleEmojis(t *testing.T) {
+	// Multiple emojis in sequence to verify cursor accumulation.
+	md := []byte("🎉🎊🎈\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Each emoji is 2 UTF-16 code units. 3 emojis + \n = 7 UTF-16 units.
+	// Starting at index 1, final cursor should be 8.
+	var maxEnd int64
+	for _, req := range requests {
+		if req.InsertText != nil {
+			idx := req.InsertText.Location.Index
+			textLen := utf16Len(req.InsertText.Text)
+			end := idx + int64(textLen)
+			if end > maxEnd {
+				maxEnd = end
+			}
+		}
+	}
+	if maxEnd != 8 {
+		t.Errorf("final cursor position: got %d, want 8 (3 emojis * 2 + \\n + start=1)", maxEnd)
+	}
+}
+
+func TestUTF16CodeUnits(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want int
+	}{
+		{"empty", "", 0},
+		{"ascii", "hello", 5},
+		{"newline", "\n", 1},
+
+		// BMP characters (1 UTF-16 code unit each)
+		{"latin_accented", "café", 4},                       // precomposed é = U+00E9
+		{"combining_accent", "cafe\u0301", 5},               // e + combining acute = 2 code units
+		{"cjk", "漢字", 2},                                    // U+6F22 U+5B57
+		{"cyrillic", "Привет", 6},                           // all BMP
+		{"arabic", "مرحبا", 5},                              // all BMP
+		{"variation_selector", "\u2764\uFE0F", 2},           // ❤️ = heart + VS16
+		{"zwj", "\u200D", 1},                                // zero-width joiner
+
+		// Supplementary plane (2 UTF-16 code units each)
+		{"single_emoji", "🤷", 2},                            // U+1F937
+		{"flag_emoji", "\U0001F1FA\U0001F1F8", 4},           // 🇺🇸 = 2 regional indicators
+		{"skin_tone", "\U0001F44B\U0001F3FF", 4},            // 👋🏿 = wave + dark skin tone
+		{"math_symbol", "𝒜", 2},                             // U+1D49C mathematical script A
+		{"musical_symbol", "𝄞", 2},                          // U+1D11E treble clef
+
+		// Complex grapheme clusters
+		{"family_zwj", "\U0001F468\u200D\U0001F469\u200D\U0001F467\u200D\U0001F466", 11},
+		// 👨‍👩‍👧‍👦 = 4 emoji (2 each) + 3 ZWJ (1 each) = 11
+
+		{"emoji_with_vs", "\U0001F44D\uFE0F", 3}, // 👍️ = thumbs up (2) + VS16 (1)
+
+		// Mixed content
+		{"ascii_and_emoji", "Hi 🤷 there", 11}, // 3 + 2 + 6 = 11
+		{"mixed_scripts", "Hello世界🌍", 9},      // 5 + 2 + 2 = 9
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := utf16CodeUnits(tt.s)
+			if got != tt.want {
+				t.Errorf("utf16CodeUnits(%q) = %d, want %d", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFromMarkdown_ComplexUnicode(t *testing.T) {
+	tests := []struct {
+		name    string
+		md      string
+		wantEnd int64 // expected final cursor position (from index 1)
+	}{
+		{
+			name:    "flag_emoji",
+			md:      "🇺🇸\n",
+			wantEnd: 1 + 4 + 1, // flag (4 UTF-16 units) + \n
+		},
+		{
+			name:    "family_zwj_emoji",
+			md:      "👨‍👩‍👧‍👦\n",
+			wantEnd: 1 + 11 + 1, // family (11 UTF-16 units) + \n
+		},
+		{
+			name:    "skin_tone_emoji",
+			md:      "👋🏿\n",
+			wantEnd: 1 + 4 + 1, // wave+skin (4 UTF-16 units) + \n
+		},
+		{
+			name:    "combining_characters",
+			md:      "cafe\u0301\n", // café with combining accent
+			wantEnd: 1 + 5 + 1,     // c(1) a(1) f(1) e(1) combining(1) + \n
+		},
+		{
+			name:    "mixed_emoji_and_text",
+			md:      "Hello 🌍 world 🎉!\n",
+			wantEnd: 1 + 6 + 2 + 7 + 2 + 1 + 1, // "Hello "(6) + 🌍(2) + " world "(7) + 🎉(2) + !(1) + \n(1)
+		},
+		{
+			name:    "heading_with_emoji",
+			md:      "# 🚀 Launch\n",
+			wantEnd: 1 + 2 + 1 + 6 + 1, // 🚀(2) + " "(1) + "Launch"(6) + \n(1)
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests, err := FromMarkdown([]byte(tt.md))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var maxEnd int64
+			for _, req := range requests {
+				if req.InsertText != nil {
+					idx := req.InsertText.Location.Index
+					end := idx + int64(utf16Len(req.InsertText.Text))
+					if end > maxEnd {
+						maxEnd = end
+					}
+				}
+			}
+			if maxEnd != tt.wantEnd {
+				t.Errorf("final cursor = %d, want %d", maxEnd, tt.wantEnd)
+			}
+		})
+	}
+}
+
+func TestUTF16CodeUnits_Sanitized(t *testing.T) {
+	// After sanitization, null bytes and control characters should be stripped.
+	// This test verifies sanitizeForDocs produces clean strings.
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"null_byte", "hello\x00world", "helloworld"},
+		{"control_chars", "line\x01\x02\x03end", "lineend"},
+		{"keeps_tab", "col1\tcol2", "col1\tcol2"},
+		{"keeps_newline", "line1\nline2", "line1\nline2"},
+		{"keeps_cr", "line1\rline2", "line1\rline2"},
+		{"mixed", "ok\x00\x01\tnewline\n\x7Fend", "ok\tnewline\nend"},
+		{"empty", "", ""},
+		{"all_valid", "Hello 🤷 world!", "Hello 🤷 world!"},
+		{"surrogate_half", "before\xED\xA0\x80after", "before\uFFFD\uFFFD\uFFFDafter"}, // invalid UTF-8: 3 bad bytes → 3 U+FFFD
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeForDocs(tt.in)
+			if got != tt.want {
+				t.Errorf("sanitizeForDocs(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFromMarkdown_NullByteStripped(t *testing.T) {
+	// Markdown with embedded null byte should not produce InsertText with \x00.
+	md := []byte("Hello\x00World\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, req := range requests {
+		if req.InsertText != nil {
+			for _, b := range req.InsertText.Text {
+				if b == 0 {
+					t.Fatal("InsertText contains null byte — Google Docs API will reject this")
+				}
+			}
+		}
+	}
+}
+
+func TestFromMarkdown_ControlCharsStripped(t *testing.T) {
+	// Control characters (except \t, \n, \r) should be stripped.
+	md := []byte("before\x01\x02\x03after\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, req := range requests {
+		if req.InsertText != nil {
+			for _, r := range req.InsertText.Text {
+				if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+					t.Fatalf("InsertText contains control char U+%04X — Google Docs API will reject this", r)
+				}
+				if r == 0x7F {
+					t.Fatal("InsertText contains DEL (U+007F)")
+				}
+			}
+		}
+	}
+}
+
 func TestFromMarkdown_Empty(t *testing.T) {
 	requests, err := FromMarkdown([]byte(""))
 	if err != nil {
@@ -968,5 +1235,609 @@ func TestHeadingPrefixFor(t *testing.T) {
 		if got := headingPrefixFor(style); got != expected {
 			t.Errorf("headingPrefixFor(%q) = %q, want %q", style, got, expected)
 		}
+	}
+}
+
+// --- Coverage-boosting tests for frommarkdown.go ---
+
+func TestFromMarkdown_AutoLink(t *testing.T) {
+	md := []byte("Check <https://example.com> for details.\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+
+	// Should contain a link style for the URL.
+	var hasLink bool
+	for _, r := range reqs {
+		if r.UpdateTextStyle != nil && r.UpdateTextStyle.TextStyle != nil &&
+			r.UpdateTextStyle.TextStyle.Link != nil &&
+			r.UpdateTextStyle.TextStyle.Link.Url == "https://example.com" {
+			hasLink = true
+		}
+	}
+	if !hasLink {
+		t.Error("expected link request for autolink URL")
+	}
+}
+
+func TestFromMarkdown_Image(t *testing.T) {
+	md := []byte("![alt text](https://example.com/image.png)\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+
+	// Should insert the alt text and link to image URL.
+	var hasAltText, hasImageLink bool
+	for _, r := range reqs {
+		if r.InsertText != nil && strings.Contains(r.InsertText.Text, "alt text") {
+			hasAltText = true
+		}
+		if r.UpdateTextStyle != nil && r.UpdateTextStyle.TextStyle != nil &&
+			r.UpdateTextStyle.TextStyle.Link != nil &&
+			r.UpdateTextStyle.TextStyle.Link.Url == "https://example.com/image.png" {
+			hasImageLink = true
+		}
+	}
+	if !hasAltText {
+		t.Error("expected insert of alt text for image")
+	}
+	if !hasImageLink {
+		t.Error("expected link to image URL")
+	}
+}
+
+func TestFromMarkdown_ImageNoAlt(t *testing.T) {
+	md := []byte("![](https://example.com/pic.png)\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+
+	// Should fall back to "image" as alt text.
+	var hasImage bool
+	for _, r := range reqs {
+		if r.InsertText != nil && r.InsertText.Text == "image" {
+			hasImage = true
+		}
+	}
+	if !hasImage {
+		t.Error("expected 'image' fallback alt text")
+	}
+}
+
+func TestFromMarkdown_Blockquote(t *testing.T) {
+	md := []byte("> This is a quote.\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+
+	// Should contain "> " prefix.
+	var hasPrefix bool
+	for _, r := range reqs {
+		if r.InsertText != nil && r.InsertText.Text == "> " {
+			hasPrefix = true
+		}
+	}
+	if !hasPrefix {
+		t.Error("expected '> ' prefix for blockquote")
+	}
+}
+
+func TestFromMarkdown_SoftLineBreak(t *testing.T) {
+	// In goldmark, lines within a paragraph that end without two spaces are soft breaks.
+	md := []byte("line one\nline two\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+
+	// Should have both lines inserted.
+	var text strings.Builder
+	for _, r := range reqs {
+		if r.InsertText != nil {
+			text.WriteString(r.InsertText.Text)
+		}
+	}
+	if !strings.Contains(text.String(), "line one") || !strings.Contains(text.String(), "line two") {
+		t.Errorf("expected both lines, got %q", text.String())
+	}
+}
+
+func TestFromMarkdown_HardLineBreak(t *testing.T) {
+	// Two trailing spaces create a hard break.
+	md := []byte("line one  \nline two\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+
+	var text strings.Builder
+	for _, r := range reqs {
+		if r.InsertText != nil {
+			text.WriteString(r.InsertText.Text)
+		}
+	}
+	if !strings.Contains(text.String(), "line one") || !strings.Contains(text.String(), "line two") {
+		t.Errorf("expected both lines with hard break, got %q", text.String())
+	}
+}
+
+func TestFromMarkdown_AllHeadingLevels(t *testing.T) {
+	md := []byte("# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+
+	styles := map[string]bool{}
+	for _, r := range reqs {
+		if r.UpdateParagraphStyle != nil {
+			styles[r.UpdateParagraphStyle.ParagraphStyle.NamedStyleType] = true
+		}
+	}
+	for _, want := range []string{StyleHeading1, StyleHeading2, StyleHeading3, StyleHeading4, StyleHeading5, StyleHeading6} {
+		if !styles[want] {
+			t.Errorf("missing paragraph style %q", want)
+		}
+	}
+}
+
+func TestFromMarkdown_Strikethrough(t *testing.T) {
+	md := []byte("~~deleted~~\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+
+	var hasStrikethrough bool
+	for _, r := range reqs {
+		if r.UpdateTextStyle != nil && r.UpdateTextStyle.TextStyle != nil &&
+			r.UpdateTextStyle.TextStyle.Strikethrough {
+			hasStrikethrough = true
+		}
+	}
+	if !hasStrikethrough {
+		t.Error("expected strikethrough style")
+	}
+}
+
+func TestFromMarkdown_IndentedCodeBlock(t *testing.T) {
+	md := []byte("    code line 1\n    code line 2\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+
+	var hasMonospace bool
+	for _, r := range reqs {
+		if r.UpdateTextStyle != nil && r.UpdateTextStyle.TextStyle != nil &&
+			r.UpdateTextStyle.TextStyle.WeightedFontFamily != nil &&
+			r.UpdateTextStyle.TextStyle.WeightedFontFamily.FontFamily == "Courier New" {
+			hasMonospace = true
+		}
+	}
+	if !hasMonospace {
+		t.Error("expected Courier New font for indented code block")
+	}
+}
+
+func TestFromMarkdown_OrderedList(t *testing.T) {
+	md := []byte("1. First\n2. Second\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+
+	var hasOrderedMarker bool
+	for _, r := range reqs {
+		if r.InsertText != nil && strings.HasPrefix(r.InsertText.Text, "1. ") {
+			hasOrderedMarker = true
+		}
+	}
+	if !hasOrderedMarker {
+		t.Error("expected ordered list marker '1. '")
+	}
+}
+
+func TestFromMarkdown_HTMLBlock(t *testing.T) {
+	md := []byte("<div>HTML content</div>\n\nNormal text.\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+	// HTML blocks should be skipped; normal text should still be present.
+	var hasNormalText bool
+	for _, r := range reqs {
+		if r.InsertText != nil && strings.Contains(r.InsertText.Text, "Normal text.") {
+			hasNormalText = true
+		}
+	}
+	if !hasNormalText {
+		t.Error("expected normal text after HTML block")
+	}
+}
+
+// --- Coverage-boosting tests for tomarkdown.go ---
+
+func TestToMarkdown_InlineObject(t *testing.T) {
+	doc := &docs.Document{
+		Body: &docs.Body{
+			Content: []*docs.StructuralElement{
+				{
+					Paragraph: &docs.Paragraph{
+						ParagraphStyle: &docs.ParagraphStyle{
+							NamedStyleType: StyleNormalText,
+						},
+						Elements: []*docs.ParagraphElement{
+							{
+								InlineObjectElement: &docs.InlineObjectElement{
+									InlineObjectId: "kix.obj123",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Lists: make(map[string]docs.List),
+	}
+
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	if !strings.Contains(string(md), "![image](kix.obj123)") {
+		t.Errorf("expected inline object markdown, got %q", md)
+	}
+}
+
+func TestToMarkdown_CodeBlockWithNilTextRun(t *testing.T) {
+	doc := makeDoc(
+		&docs.StructuralElement{
+			Paragraph: &docs.Paragraph{
+				ParagraphStyle: &docs.ParagraphStyle{
+					NamedStyleType: StyleNormalText,
+				},
+				Elements: []*docs.ParagraphElement{
+					{TextRun: &docs.TextRun{
+						Content: "monospace\n",
+						TextStyle: &docs.TextStyle{
+							WeightedFontFamily: &docs.WeightedFontFamily{
+								FontFamily: "Courier New",
+							},
+						},
+					}},
+					{TextRun: nil}, // nil TextRun in code block
+				},
+			},
+		},
+	)
+
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	if !strings.Contains(string(md), "monospace") {
+		t.Errorf("expected monospace text, got %q", md)
+	}
+}
+
+func TestToMarkdown_SectionBreak(t *testing.T) {
+	doc := &docs.Document{
+		Body: &docs.Body{
+			Content: []*docs.StructuralElement{
+				{SectionBreak: &docs.SectionBreak{}},
+				makeParagraph(StyleNormalText, &docs.TextRun{Content: "Hello\n"}),
+			},
+		},
+		Lists: make(map[string]docs.List),
+	}
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	if !strings.Contains(string(md), "Hello") {
+		t.Errorf("expected Hello after section break, got %q", md)
+	}
+}
+
+func TestToMarkdown_TableOfContents(t *testing.T) {
+	doc := &docs.Document{
+		Body: &docs.Body{
+			Content: []*docs.StructuralElement{
+				{TableOfContents: &docs.TableOfContents{}},
+				makeParagraph(StyleNormalText, &docs.TextRun{Content: "After TOC\n"}),
+			},
+		},
+		Lists: make(map[string]docs.List),
+	}
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	if !strings.Contains(string(md), "After TOC") {
+		t.Errorf("expected text after TOC, got %q", md)
+	}
+}
+
+func TestToMarkdown_NilParagraphElement(t *testing.T) {
+	doc := &docs.Document{
+		Body: &docs.Body{
+			Content: []*docs.StructuralElement{
+				{}, // nil Paragraph, Table, etc.
+				makeParagraph(StyleNormalText, &docs.TextRun{Content: "text\n"}),
+			},
+		},
+		Lists: make(map[string]docs.List),
+	}
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	if !strings.Contains(string(md), "text") {
+		t.Errorf("expected text, got %q", md)
+	}
+}
+
+func TestToMarkdown_EmptyParagraph(t *testing.T) {
+	doc := &docs.Document{
+		Body: &docs.Body{
+			Content: []*docs.StructuralElement{
+				makeParagraph(StyleNormalText, &docs.TextRun{Content: ""}),
+				makeParagraph(StyleNormalText, &docs.TextRun{Content: "after\n"}),
+			},
+		},
+		Lists: make(map[string]docs.List),
+	}
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	if !strings.Contains(string(md), "after") {
+		t.Errorf("expected text after empty paragraph, got %q", md)
+	}
+}
+
+func TestToMarkdown_NilParagraphStyle(t *testing.T) {
+	doc := &docs.Document{
+		Body: &docs.Body{
+			Content: []*docs.StructuralElement{
+				{
+					Paragraph: &docs.Paragraph{
+						ParagraphStyle: nil,
+						Elements: []*docs.ParagraphElement{
+							{TextRun: &docs.TextRun{Content: "no style\n"}},
+						},
+					},
+				},
+			},
+		},
+		Lists: make(map[string]docs.List),
+	}
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	if !strings.Contains(string(md), "no style") {
+		t.Errorf("expected text, got %q", md)
+	}
+}
+
+func TestToMarkdown_ConsecutiveCodeBlocks(t *testing.T) {
+	mono := func(text string) *docs.StructuralElement {
+		return &docs.StructuralElement{
+			Paragraph: &docs.Paragraph{
+				ParagraphStyle: &docs.ParagraphStyle{NamedStyleType: StyleNormalText},
+				Elements: []*docs.ParagraphElement{
+					{TextRun: &docs.TextRun{
+						Content: text,
+						TextStyle: &docs.TextStyle{
+							WeightedFontFamily: &docs.WeightedFontFamily{FontFamily: "Courier New"},
+						},
+					}},
+				},
+			},
+		}
+	}
+	doc := &docs.Document{
+		Body: &docs.Body{
+			Content: []*docs.StructuralElement{
+				mono("line 1\n"),
+				mono("line 2\n"),
+			},
+		},
+		Lists: make(map[string]docs.List),
+	}
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	s := string(md)
+	if !strings.Contains(s, "```\n") {
+		t.Error("expected fenced code block")
+	}
+	if !strings.Contains(s, "line 1") || !strings.Contains(s, "line 2") {
+		t.Errorf("expected both lines, got %q", s)
+	}
+}
+
+func TestToMarkdown_TrailingCodeBlock(t *testing.T) {
+	doc := &docs.Document{
+		Body: &docs.Body{
+			Content: []*docs.StructuralElement{
+				{
+					Paragraph: &docs.Paragraph{
+						ParagraphStyle: &docs.ParagraphStyle{NamedStyleType: StyleNormalText},
+						Elements: []*docs.ParagraphElement{
+							{TextRun: &docs.TextRun{
+								Content: "code\n",
+								TextStyle: &docs.TextStyle{
+									WeightedFontFamily: &docs.WeightedFontFamily{FontFamily: "Courier New"},
+								},
+							}},
+						},
+					},
+				},
+				{
+					Paragraph: &docs.Paragraph{
+						ParagraphStyle: &docs.ParagraphStyle{NamedStyleType: StyleNormalText},
+						Elements: []*docs.ParagraphElement{
+							{TextRun: &docs.TextRun{
+								Content: "more code\n",
+								TextStyle: &docs.TextStyle{
+									WeightedFontFamily: &docs.WeightedFontFamily{FontFamily: "Courier New"},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+		Lists: make(map[string]docs.List),
+	}
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	s := string(md)
+	// Should end with closing fence.
+	if !strings.HasSuffix(strings.TrimSpace(s), "```") {
+		t.Errorf("expected trailing code block to be closed, got %q", s)
+	}
+}
+
+func TestToMarkdown_CodeBlockThenTable(t *testing.T) {
+	doc := &docs.Document{
+		Body: &docs.Body{
+			Content: []*docs.StructuralElement{
+				{
+					Paragraph: &docs.Paragraph{
+						ParagraphStyle: &docs.ParagraphStyle{NamedStyleType: StyleNormalText},
+						Elements: []*docs.ParagraphElement{
+							{TextRun: &docs.TextRun{
+								Content: "code1\n",
+								TextStyle: &docs.TextStyle{
+									WeightedFontFamily: &docs.WeightedFontFamily{FontFamily: "Courier New"},
+								},
+							}},
+						},
+					},
+				},
+				{
+					Paragraph: &docs.Paragraph{
+						ParagraphStyle: &docs.ParagraphStyle{NamedStyleType: StyleNormalText},
+						Elements: []*docs.ParagraphElement{
+							{TextRun: &docs.TextRun{
+								Content: "code2\n",
+								TextStyle: &docs.TextStyle{
+									WeightedFontFamily: &docs.WeightedFontFamily{FontFamily: "Courier New"},
+								},
+							}},
+						},
+					},
+				},
+				{Table: &docs.Table{
+					TableRows: []*docs.TableRow{
+						{TableCells: []*docs.TableCell{
+							{Content: []*docs.StructuralElement{
+								makeParagraph(StyleNormalText, &docs.TextRun{Content: "cell\n"}),
+							}},
+						}},
+					},
+				}},
+			},
+		},
+		Lists: make(map[string]docs.List),
+	}
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	s := string(md)
+	// Code block should be closed before table.
+	if !strings.Contains(s, "```\n|") {
+		t.Errorf("expected code block closed before table, got %q", s)
+	}
+}
+
+func TestFromMarkdown_NestedBlockquote(t *testing.T) {
+	md := []byte("> Line one.\n> Line two.\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+	var text strings.Builder
+	for _, r := range reqs {
+		if r.InsertText != nil {
+			text.WriteString(r.InsertText.Text)
+		}
+	}
+	if !strings.Contains(text.String(), "Line one") {
+		t.Error("expected blockquote content")
+	}
+}
+
+func TestFromMarkdown_LinkWithNestedFormatting(t *testing.T) {
+	md := []byte("[**bold link**](https://example.com)\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+	var hasBold, hasLink bool
+	for _, r := range reqs {
+		if r.UpdateTextStyle != nil && r.UpdateTextStyle.TextStyle != nil {
+			if r.UpdateTextStyle.TextStyle.Bold {
+				hasBold = true
+			}
+			if r.UpdateTextStyle.TextStyle.Link != nil {
+				hasLink = true
+			}
+		}
+	}
+	if !hasBold {
+		t.Error("expected bold style in link")
+	}
+	if !hasLink {
+		t.Error("expected link style")
+	}
+}
+
+func TestFromMarkdown_ListWithNestedBlock(t *testing.T) {
+	md := []byte("- item one\n- item two\n")
+	reqs, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("FromMarkdown: %v", err)
+	}
+	var markers int
+	for _, r := range reqs {
+		if r.InsertText != nil && r.InsertText.Text == "- " {
+			markers++
+		}
+	}
+	if markers < 2 {
+		t.Errorf("expected at least 2 list markers, got %d", markers)
+	}
+}
+
+func TestToMarkdown_EmptyTable(t *testing.T) {
+	doc := &docs.Document{
+		Body: &docs.Body{
+			Content: []*docs.StructuralElement{
+				{Table: &docs.Table{}},
+			},
+		},
+		Lists: make(map[string]docs.List),
+	}
+
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	// Empty table should produce no output.
+	if strings.Contains(string(md), "|") {
+		t.Errorf("empty table should not produce output, got %q", md)
 	}
 }

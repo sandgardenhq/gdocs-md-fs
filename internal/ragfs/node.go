@@ -112,6 +112,7 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 		out.Mode = syscall.S_IFREG | 0o644
 		out.Uid = d.uid
 		out.Gid = d.gid
+		out.Mtime = uint64(tf.mod.Unix())
 
 		child := d.NewInode(ctx, tf, fs.StableAttr{Mode: syscall.S_IFREG})
 		return child, nil, fuse.FOPEN_DIRECT_IO, fs.OK
@@ -175,7 +176,8 @@ func (d *Dir) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 // Rename moves or renames an entry from this directory to another.
 func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	// Renaming temp files stays in-memory.
+	// Renaming temp files stays in-memory, unless the destination is a
+	// non-temp name (e.g., editor atomic save: write .tmp → rename to .md).
 	d.tempMu.RLock()
 	tf, isTmp := d.tempFiles[name]
 	d.tempMu.RUnlock()
@@ -184,16 +186,53 @@ func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 		if !ok {
 			return syscall.EIO
 		}
-		d.tempMu.Lock()
-		delete(d.tempFiles, name)
-		d.tempMu.Unlock()
-		newDir.tempMu.Lock()
-		if newDir.tempFiles == nil {
-			newDir.tempFiles = make(map[string]*TempFile)
+		if !isTempFile(newName) {
+			// Promote: create the file in the backend, then write content.
+			tf.mu.Lock()
+			data := make([]byte, len(tf.data))
+			copy(data, tf.data)
+			tf.mu.Unlock()
+
+			newPath := path.Join(newDir.path, newName)
+			if _, err := d.handler.Create(ctx, newPath, false); err != nil {
+				return syscall.EIO
+			}
+			if err := d.handler.Write(ctx, newPath, data); err != nil {
+				return syscall.EIO
+			}
+
+			d.tempMu.Lock()
+			delete(d.tempFiles, name)
+			d.tempMu.Unlock()
+
+			d.cache.Invalidate(d.path)
+			d.cache.Invalidate(newPath)
+			if newDir != d {
+				newDir.cache.Invalidate(newDir.path)
+			}
+			return fs.OK
 		}
-		tf.name = newName
-		newDir.tempFiles[newName] = tf
-		newDir.tempMu.Unlock()
+		// Temp-to-temp rename stays in-memory.
+		if d == newDir {
+			// Same directory: single lock to avoid a window where the
+			// file is absent from the map.
+			d.tempMu.Lock()
+			delete(d.tempFiles, name)
+			tf.name = newName
+			d.tempFiles[newName] = tf
+			d.tempMu.Unlock()
+		} else {
+			d.tempMu.Lock()
+			delete(d.tempFiles, name)
+			d.tempMu.Unlock()
+			newDir.tempMu.Lock()
+			if newDir.tempFiles == nil {
+				newDir.tempFiles = make(map[string]*TempFile)
+			}
+			tf.name = newName
+			newDir.tempFiles[newName] = tf
+			newDir.tempMu.Unlock()
+		}
 		return fs.OK
 	}
 
