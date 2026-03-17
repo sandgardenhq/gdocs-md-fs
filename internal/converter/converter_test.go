@@ -1841,3 +1841,48 @@ func TestToMarkdown_EmptyTable(t *testing.T) {
 		t.Errorf("empty table should not produce output, got %q", md)
 	}
 }
+
+func TestFromMarkdown_TextStylesAfterParagraphStyles(t *testing.T) {
+	md := []byte("**bold text**\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the indices of the relevant requests.
+	lastParagraphStyleIdx := -1
+	firstTextStyleIdx := -1
+	lastInsertIdx := -1
+
+	for i, req := range requests {
+		if req.InsertText != nil {
+			lastInsertIdx = i
+		}
+		if req.UpdateParagraphStyle != nil {
+			lastParagraphStyleIdx = i
+		}
+		if req.UpdateTextStyle != nil && firstTextStyleIdx == -1 {
+			firstTextStyleIdx = i
+		}
+	}
+
+	if firstTextStyleIdx == -1 {
+		t.Fatal("no UpdateTextStyle requests found")
+	}
+	if lastParagraphStyleIdx == -1 {
+		t.Fatal("no UpdateParagraphStyle requests found")
+	}
+	if lastInsertIdx == -1 {
+		t.Fatal("no InsertText requests found")
+	}
+
+	// All inserts must come before all styles.
+	if lastInsertIdx >= firstTextStyleIdx {
+		t.Errorf("InsertText (index %d) must come before first UpdateTextStyle (index %d)", lastInsertIdx, firstTextStyleIdx)
+	}
+
+	// Paragraph styles must come before text styles.
+	if lastParagraphStyleIdx >= firstTextStyleIdx {
+		t.Errorf("UpdateParagraphStyle (index %d) must come before first UpdateTextStyle (index %d)", lastParagraphStyleIdx, firstTextStyleIdx)
+	}
+}

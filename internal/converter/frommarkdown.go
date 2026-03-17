@@ -34,7 +34,32 @@ func FromMarkdown(md []byte) ([]*docs.Request, error) {
 		return nil, fmt.Errorf("converter: %w", err)
 	}
 
-	return b.requests, nil
+	return reorderRequests(b.requests), nil
+}
+
+// reorderRequests sorts requests so that all InsertText requests come first
+// (preserving their relative order), followed by UpdateParagraphStyle, then
+// UpdateTextStyle. This prevents paragraph style changes (e.g. NORMAL_TEXT)
+// from resetting explicitly-applied text formatting (bold, italic, etc.).
+func reorderRequests(requests []*docs.Request) []*docs.Request {
+	var inserts, paraStyles, textStyles []*docs.Request
+	for _, r := range requests {
+		switch {
+		case r.InsertText != nil:
+			inserts = append(inserts, r)
+		case r.UpdateParagraphStyle != nil:
+			paraStyles = append(paraStyles, r)
+		case r.UpdateTextStyle != nil:
+			textStyles = append(textStyles, r)
+		default:
+			inserts = append(inserts, r)
+		}
+	}
+	result := make([]*docs.Request, 0, len(requests))
+	result = append(result, inserts...)
+	result = append(result, paraStyles...)
+	result = append(result, textStyles...)
+	return result
 }
 
 // requestBuilder accumulates Google Docs API requests while walking a goldmark AST.
