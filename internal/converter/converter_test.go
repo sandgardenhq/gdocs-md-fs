@@ -813,6 +813,115 @@ func TestFromMarkdown_MultipleEmojis(t *testing.T) {
 	}
 }
 
+func TestUTF16CodeUnits(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want int
+	}{
+		{"empty", "", 0},
+		{"ascii", "hello", 5},
+		{"newline", "\n", 1},
+
+		// BMP characters (1 UTF-16 code unit each)
+		{"latin_accented", "café", 4},                       // precomposed é = U+00E9
+		{"combining_accent", "cafe\u0301", 5},               // e + combining acute = 2 code units
+		{"cjk", "漢字", 2},                                    // U+6F22 U+5B57
+		{"cyrillic", "Привет", 6},                           // all BMP
+		{"arabic", "مرحبا", 5},                              // all BMP
+		{"variation_selector", "\u2764\uFE0F", 2},           // ❤️ = heart + VS16
+		{"zwj", "\u200D", 1},                                // zero-width joiner
+
+		// Supplementary plane (2 UTF-16 code units each)
+		{"single_emoji", "🤷", 2},                            // U+1F937
+		{"flag_emoji", "\U0001F1FA\U0001F1F8", 4},           // 🇺🇸 = 2 regional indicators
+		{"skin_tone", "\U0001F44B\U0001F3FF", 4},            // 👋🏿 = wave + dark skin tone
+		{"math_symbol", "𝒜", 2},                             // U+1D49C mathematical script A
+		{"musical_symbol", "𝄞", 2},                          // U+1D11E treble clef
+
+		// Complex grapheme clusters
+		{"family_zwj", "\U0001F468\u200D\U0001F469\u200D\U0001F467\u200D\U0001F466", 11},
+		// 👨‍👩‍👧‍👦 = 4 emoji (2 each) + 3 ZWJ (1 each) = 11
+
+		{"emoji_with_vs", "\U0001F44D\uFE0F", 3}, // 👍️ = thumbs up (2) + VS16 (1)
+
+		// Mixed content
+		{"ascii_and_emoji", "Hi 🤷 there", 11}, // 3 + 2 + 6 = 11
+		{"mixed_scripts", "Hello世界🌍", 9},      // 5 + 2 + 2 = 9
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := utf16CodeUnits(tt.s)
+			if got != tt.want {
+				t.Errorf("utf16CodeUnits(%q) = %d, want %d", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFromMarkdown_ComplexUnicode(t *testing.T) {
+	tests := []struct {
+		name    string
+		md      string
+		wantEnd int64 // expected final cursor position (from index 1)
+	}{
+		{
+			name:    "flag_emoji",
+			md:      "🇺🇸\n",
+			wantEnd: 1 + 4 + 1, // flag (4 UTF-16 units) + \n
+		},
+		{
+			name:    "family_zwj_emoji",
+			md:      "👨‍👩‍👧‍👦\n",
+			wantEnd: 1 + 11 + 1, // family (11 UTF-16 units) + \n
+		},
+		{
+			name:    "skin_tone_emoji",
+			md:      "👋🏿\n",
+			wantEnd: 1 + 4 + 1, // wave+skin (4 UTF-16 units) + \n
+		},
+		{
+			name:    "combining_characters",
+			md:      "cafe\u0301\n", // café with combining accent
+			wantEnd: 1 + 5 + 1,     // c(1) a(1) f(1) e(1) combining(1) + \n
+		},
+		{
+			name:    "mixed_emoji_and_text",
+			md:      "Hello 🌍 world 🎉!\n",
+			wantEnd: 1 + 6 + 2 + 7 + 2 + 1 + 1, // "Hello "(6) + 🌍(2) + " world "(7) + 🎉(2) + !(1) + \n(1)
+		},
+		{
+			name:    "heading_with_emoji",
+			md:      "# 🚀 Launch\n",
+			wantEnd: 1 + 2 + 1 + 6 + 1, // 🚀(2) + " "(1) + "Launch"(6) + \n(1)
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests, err := FromMarkdown([]byte(tt.md))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var maxEnd int64
+			for _, req := range requests {
+				if req.InsertText != nil {
+					idx := req.InsertText.Location.Index
+					end := idx + int64(utf16Len(req.InsertText.Text))
+					if end > maxEnd {
+						maxEnd = end
+					}
+				}
+			}
+			if maxEnd != tt.wantEnd {
+				t.Errorf("final cursor = %d, want %d", maxEnd, tt.wantEnd)
+			}
+		})
+	}
+}
+
 func TestFromMarkdown_Empty(t *testing.T) {
 	requests, err := FromMarkdown([]byte(""))
 	if err != nil {
