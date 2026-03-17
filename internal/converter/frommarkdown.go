@@ -20,7 +20,7 @@ import (
 // The caller is responsible for clearing existing document content before
 // applying these requests (see gdrive.buildWriteRequests).
 func FromMarkdown(md []byte) ([]*docs.Request, error) {
-	gm := goldmark.New(goldmark.WithExtensions(extension.Strikethrough))
+	gm := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	reader := text.NewReader(md)
 	tree := gm.Parser().Parse(reader)
 

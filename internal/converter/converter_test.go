@@ -602,24 +602,20 @@ func TestFromMarkdown_List(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should have InsertText requests containing the list items.
-	var hasItem1, hasItem2 bool
+	// Concatenate all InsertText content to verify list items are present.
+	// The GFM Linkify extension may split text across multiple Text nodes.
+	var allText strings.Builder
 	for _, req := range requests {
-		if req.InsertText == nil {
-			continue
-		}
-		if strings.Contains(req.InsertText.Text, "item one") {
-			hasItem1 = true
-		}
-		if strings.Contains(req.InsertText.Text, "item two") {
-			hasItem2 = true
+		if req.InsertText != nil {
+			allText.WriteString(req.InsertText.Text)
 		}
 	}
-	if !hasItem1 {
-		t.Error("missing InsertText for 'item one'")
+	combined := allText.String()
+	if !strings.Contains(combined, "item one") {
+		t.Errorf("missing 'item one' in combined text: %q", combined)
 	}
-	if !hasItem2 {
-		t.Error("missing InsertText for 'item two'")
+	if !strings.Contains(combined, "item two") {
+		t.Errorf("missing 'item two' in combined text: %q", combined)
 	}
 }
 
@@ -1449,14 +1445,15 @@ func TestFromMarkdown_HTMLBlock(t *testing.T) {
 		t.Fatalf("FromMarkdown: %v", err)
 	}
 	// HTML blocks should be skipped; normal text should still be present.
-	var hasNormalText bool
+	// GFM Linkify may split text across multiple nodes, so combine all text.
+	var allText strings.Builder
 	for _, r := range reqs {
-		if r.InsertText != nil && strings.Contains(r.InsertText.Text, "Normal text.") {
-			hasNormalText = true
+		if r.InsertText != nil {
+			allText.WriteString(r.InsertText.Text)
 		}
 	}
-	if !hasNormalText {
-		t.Error("expected normal text after HTML block")
+	if !strings.Contains(allText.String(), "Normal text.") {
+		t.Errorf("expected normal text after HTML block, got: %q", allText.String())
 	}
 }
 
@@ -1839,6 +1836,21 @@ func TestToMarkdown_EmptyTable(t *testing.T) {
 	// Empty table should produce no output.
 	if strings.Contains(string(md), "|") {
 		t.Errorf("empty table should not produce output, got %q", md)
+	}
+}
+
+func TestFromMarkdown_GFMTableParsed(t *testing.T) {
+	md := []byte("| A | B |\n| --- | --- |\n| 1 | 2 |\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// With GFM extension, the table should NOT be inserted as literal pipe text.
+	for _, req := range requests {
+		if req.InsertText != nil && strings.Contains(req.InsertText.Text, "| A |") {
+			t.Error("table was inserted as raw text; GFM table extension not active")
+		}
 	}
 }
 
