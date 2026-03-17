@@ -262,6 +262,175 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("AppendToExistingFile_SyncsToHandler", func(t *testing.T) {
+		h.reset()
+		// Pre-populate so append has existing content.
+		h.mu.Lock()
+		h.files["appendable.md"] = []byte("# Original\n")
+		h.mu.Unlock()
+
+		filePath := filepath.Join(mntDir, "appendable.md")
+		f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			t.Fatalf("OpenFile O_APPEND: %v", err)
+		}
+		_, err = f.WriteString("\nAppended line\n")
+		if err != nil {
+			t.Fatalf("WriteString: %v", err)
+		}
+		err = f.Close()
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		if len(h.writeCalls) == 0 {
+			t.Fatal("handler.Write was never called — append did not sync to backend")
+		}
+	})
+
+	t.Run("ShellEchoRedirect_SyncsToHandler", func(t *testing.T) {
+		h.reset()
+		// Pre-populate to test the > (truncate+write) pattern.
+		h.mu.Lock()
+		h.files["shell-test.md"] = []byte("# Old\n")
+		h.mu.Unlock()
+
+		filePath := filepath.Join(mntDir, "shell-test.md")
+		// Mimic: echo "# New" > file.md (O_WRONLY|O_CREATE|O_TRUNC)
+		f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			t.Fatalf("OpenFile O_TRUNC: %v", err)
+		}
+		_, err = f.WriteString("# New\n")
+		if err != nil {
+			t.Fatalf("WriteString: %v", err)
+		}
+		err = f.Close()
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		if len(h.writeCalls) == 0 {
+			t.Fatal("handler.Write was never called — echo > redirect did not sync to backend")
+		}
+		lastWrite := h.writeCalls[len(h.writeCalls)-1]
+		if string(lastWrite.data) != "# New\n" {
+			t.Errorf("handler.Write data: got %q, want %q", lastWrite.data, "# New\n")
+		}
+	})
+
+	t.Run("ShellEchoAppend_SyncsToHandler", func(t *testing.T) {
+		h.reset()
+		// Pre-populate for >> pattern.
+		h.mu.Lock()
+		h.files["append-test.md"] = []byte("# Start\n")
+		h.mu.Unlock()
+
+		filePath := filepath.Join(mntDir, "append-test.md")
+		// Mimic: echo "extra" >> file.md (O_WRONLY|O_CREATE|O_APPEND)
+		f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		if err != nil {
+			t.Fatalf("OpenFile O_APPEND: %v", err)
+		}
+		_, err = f.WriteString("extra\n")
+		if err != nil {
+			t.Fatalf("WriteString: %v", err)
+		}
+		err = f.Close()
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		if len(h.writeCalls) == 0 {
+			t.Fatal("handler.Write was never called — echo >> append did not sync to backend")
+		}
+	})
+
+	t.Run("MultipleWritesSingleOpen_SyncsOnce", func(t *testing.T) {
+		h.reset()
+
+		filePath := filepath.Join(mntDir, "multi-write.md")
+		f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			t.Fatalf("OpenFile: %v", err)
+		}
+		// Multiple writes before close.
+		_, _ = f.WriteString("# Title\n")
+		_, _ = f.WriteString("\nParagraph one.\n")
+		_, _ = f.WriteString("\nParagraph two.\n")
+		err = f.Close()
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		if len(h.writeCalls) == 0 {
+			t.Fatal("handler.Write was never called — multiple writes did not sync")
+		}
+		lastWrite := h.writeCalls[len(h.writeCalls)-1]
+		want := "# Title\n\nParagraph one.\n\nParagraph two.\n"
+		if string(lastWrite.data) != want {
+			t.Errorf("handler.Write data:\ngot  %q\nwant %q", lastWrite.data, want)
+		}
+	})
+
+	t.Run("DeleteFile_SyncsToHandler", func(t *testing.T) {
+		h.reset()
+		// Pre-populate so delete has something to remove.
+		h.mu.Lock()
+		h.files["to-delete.md"] = []byte("# Delete me\n")
+		h.mu.Unlock()
+
+		filePath := filepath.Join(mntDir, "to-delete.md")
+		err := os.Remove(filePath)
+		if err != nil {
+			t.Fatalf("Remove: %v", err)
+		}
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		if len(h.deleteCalls) == 0 {
+			t.Fatal("handler.Delete was never called")
+		}
+	})
+
+	t.Run("RenameFile_SyncsToHandler", func(t *testing.T) {
+		h.reset()
+		h.mu.Lock()
+		h.files["old-name.md"] = []byte("# Rename me\n")
+		h.mu.Unlock()
+
+		oldPath := filepath.Join(mntDir, "old-name.md")
+		newPath := filepath.Join(mntDir, "new-name.md")
+		err := os.Rename(oldPath, newPath)
+		if err != nil {
+			t.Fatalf("Rename: %v", err)
+		}
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		if len(h.renameCalls) == 0 {
+			t.Fatal("handler.Rename was never called")
+		}
+		last := h.renameCalls[len(h.renameCalls)-1]
+		if last[0] != "old-name.md" || last[1] != "new-name.md" {
+			t.Errorf("handler.Rename: got %v, want [old-name.md new-name.md]", last)
+		}
+	})
+
 	t.Run("TempFileRenamedToReal_SyncsToHandler", func(t *testing.T) {
 		h.reset()
 
