@@ -291,15 +291,31 @@ func writeListItem(buf *strings.Builder, p *docs.Paragraph, lists map[string]doc
 	bullet := p.Bullet
 	indent := nestingIndent(bullet.NestingLevel)
 
+	text := renderTextRuns(p.Elements)
+	text = strings.TrimRight(text, "\n")
+
+	// Detect task list checkboxes (Unicode symbols inserted by FromMarkdown).
+	if after, found := strings.CutPrefix(text, "☑ "); found {
+		buf.WriteString(indent)
+		buf.WriteString("- [x] ")
+		buf.WriteString(after)
+		buf.WriteString("\n")
+		return
+	}
+	if after, found := strings.CutPrefix(text, "☐ "); found {
+		buf.WriteString(indent)
+		buf.WriteString("- [ ] ")
+		buf.WriteString(after)
+		buf.WriteString("\n")
+		return
+	}
+
 	var marker string
 	if classifyListGlyph(lists, bullet) == listOrdered {
 		marker = "1. "
 	} else {
 		marker = "- "
 	}
-
-	text := renderTextRuns(p.Elements)
-	text = strings.TrimRight(text, "\n")
 
 	buf.WriteString(indent)
 	buf.WriteString(marker)

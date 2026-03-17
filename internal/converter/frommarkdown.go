@@ -20,7 +20,7 @@ import (
 // The caller is responsible for clearing existing document content before
 // applying these requests (see gdrive.buildWriteRequests).
 func FromMarkdown(md []byte) ([]*docs.Request, error) {
-	gm := goldmark.New(goldmark.WithExtensions(extension.Strikethrough))
+	gm := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	reader := text.NewReader(md)
 	tree := gm.Parser().Parse(reader)
 
@@ -34,7 +34,32 @@ func FromMarkdown(md []byte) ([]*docs.Request, error) {
 		return nil, fmt.Errorf("converter: %w", err)
 	}
 
-	return b.requests, nil
+	return reorderRequests(b.requests), nil
+}
+
+// reorderRequests sorts requests so that all InsertText requests come first
+// (preserving their relative order), followed by UpdateParagraphStyle, then
+// UpdateTextStyle. This prevents paragraph style changes (e.g. NORMAL_TEXT)
+// from resetting explicitly-applied text formatting (bold, italic, etc.).
+func reorderRequests(requests []*docs.Request) []*docs.Request {
+	var inserts, paraStyles, textStyles []*docs.Request
+	for _, r := range requests {
+		switch {
+		case r.InsertText != nil:
+			inserts = append(inserts, r)
+		case r.UpdateParagraphStyle != nil:
+			paraStyles = append(paraStyles, r)
+		case r.UpdateTextStyle != nil:
+			textStyles = append(textStyles, r)
+		default:
+			inserts = append(inserts, r)
+		}
+	}
+	result := make([]*docs.Request, 0, len(requests))
+	result = append(result, inserts...)
+	result = append(result, paraStyles...)
+	result = append(result, textStyles...)
+	return result
 }
 
 // requestBuilder accumulates Google Docs API requests while walking a goldmark AST.
@@ -248,6 +273,22 @@ func (b *requestBuilder) walkNode(node ast.Node, source []byte) error {
 
 	case *ast.Blockquote:
 		return b.handleBlockquote(n, source)
+
+	case *extast.Table:
+		b.handleTable(n, source)
+		return nil
+
+	case *extast.TableHeader, *extast.TableRow, *extast.TableCell:
+		// Handled collectively by handleTable; skip if encountered directly.
+		return nil
+
+	case *extast.TaskCheckBox:
+		if n.IsChecked {
+			b.insertText("☑ ")
+		} else {
+			b.insertText("☐ ")
+		}
+		return nil
 
 	case *extast.Strikethrough:
 		return b.handleStrikethrough(n, source)
@@ -514,6 +555,96 @@ func (b *requestBuilder) handleThematicBreak() {
 	// and rely on the caller to handle it, or we can use a special request.
 	// For now, insert the text representation.
 	b.insertText("---\n")
+}
+
+// collectTableData extracts cell text content from a goldmark Table AST node
+// into a 2D string grid. The header row is included as the first row.
+func (b *requestBuilder) collectTableData(table ast.Node, source []byte) [][]string {
+	var rows [][]string
+	for row := table.FirstChild(); row != nil; row = row.NextSibling() {
+		var cells []string
+		for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
+			var cellBuf strings.Builder
+			b.collectCellText(cell, source, &cellBuf)
+			cells = append(cells, cellBuf.String())
+		}
+		if len(cells) > 0 {
+			rows = append(rows, cells)
+		}
+	}
+	return rows
+}
+
+// collectCellText recursively collects text content from a table cell's children.
+func (b *requestBuilder) collectCellText(node ast.Node, source []byte, buf *strings.Builder) {
+	for child := node.FirstChild(); child != nil; child = child.NextSibling() {
+		if t, ok := child.(*ast.Text); ok {
+			buf.Write(t.Segment.Value(source))
+		} else {
+			// Recurse into inline elements (emphasis, code span, etc.).
+			b.collectCellText(child, source, buf)
+		}
+	}
+}
+
+// handleTable processes a GFM table node and emits InsertTable + cell content requests.
+func (b *requestBuilder) handleTable(table ast.Node, source []byte) {
+	data := b.collectTableData(table, source)
+	if len(data) == 0 {
+		return
+	}
+	numRows := len(data)
+	numCols := len(data[0])
+	if numCols == 0 {
+		return
+	}
+
+	// InsertTable at the current cursor position.
+	b.requests = append(b.requests, &docs.Request{
+		InsertTable: &docs.InsertTableRequest{
+			Location: &docs.Location{Index: b.cursor},
+			Rows:     int64(numRows),
+			Columns:  int64(numCols),
+		},
+	})
+
+	// The InsertTable API inserts a newline before the table.
+	// Table body starts at cursor + 2.
+	// Each cell occupies 2 index units (paragraph start + newline).
+	// Each row has an additional 1 index unit overhead for the row boundary.
+	// Cell (r, c) paragraph start = tableBodyStart + r*(numCols*2+1) + c*2
+	//
+	// Cells are inserted in REVERSE order (last cell first) because the
+	// Google Docs batchUpdate API processes requests sequentially — inserting
+	// text into an earlier cell shifts all subsequent indices. By going in
+	// reverse, each insertion only affects higher indices that have already
+	// been populated.
+	tableBodyStart := b.cursor + 2
+
+	var totalCellText int64
+	for r := numRows - 1; r >= 0; r-- {
+		for c := numCols - 1; c >= 0; c-- {
+			cellStart := tableBodyStart + int64(r)*(int64(numCols)*2+1) + int64(c)*2
+			text := ""
+			if c < len(data[r]) {
+				text = data[r][c]
+			}
+			if text != "" {
+				b.requests = append(b.requests, &docs.Request{
+					InsertText: &docs.InsertTextRequest{
+						Location: &docs.Location{Index: cellStart},
+						Text:     text,
+					},
+				})
+				totalCellText += int64(len(text))
+			}
+		}
+	}
+
+	// Advance cursor past the entire table, including inserted cell text.
+	// Structure: 1 (auto newline) + 1 (table start) + numRows*(numCols*2+1) + 1 (trailing newline)
+	totalSize := int64(2+numRows*(numCols*2+1)+1) + totalCellText
+	b.cursor += totalSize
 }
 
 // handleBlockquote processes a blockquote. Google Docs doesn't have native

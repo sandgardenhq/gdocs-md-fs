@@ -602,24 +602,20 @@ func TestFromMarkdown_List(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should have InsertText requests containing the list items.
-	var hasItem1, hasItem2 bool
+	// Concatenate all InsertText content to verify list items are present.
+	// The GFM Linkify extension may split text across multiple Text nodes.
+	var allText strings.Builder
 	for _, req := range requests {
-		if req.InsertText == nil {
-			continue
-		}
-		if strings.Contains(req.InsertText.Text, "item one") {
-			hasItem1 = true
-		}
-		if strings.Contains(req.InsertText.Text, "item two") {
-			hasItem2 = true
+		if req.InsertText != nil {
+			allText.WriteString(req.InsertText.Text)
 		}
 	}
-	if !hasItem1 {
-		t.Error("missing InsertText for 'item one'")
+	combined := allText.String()
+	if !strings.Contains(combined, "item one") {
+		t.Errorf("missing 'item one' in combined text: %q", combined)
 	}
-	if !hasItem2 {
-		t.Error("missing InsertText for 'item two'")
+	if !strings.Contains(combined, "item two") {
+		t.Errorf("missing 'item two' in combined text: %q", combined)
 	}
 }
 
@@ -1449,14 +1445,15 @@ func TestFromMarkdown_HTMLBlock(t *testing.T) {
 		t.Fatalf("FromMarkdown: %v", err)
 	}
 	// HTML blocks should be skipped; normal text should still be present.
-	var hasNormalText bool
+	// GFM Linkify may split text across multiple nodes, so combine all text.
+	var allText strings.Builder
 	for _, r := range reqs {
-		if r.InsertText != nil && strings.Contains(r.InsertText.Text, "Normal text.") {
-			hasNormalText = true
+		if r.InsertText != nil {
+			allText.WriteString(r.InsertText.Text)
 		}
 	}
-	if !hasNormalText {
-		t.Error("expected normal text after HTML block")
+	if !strings.Contains(allText.String(), "Normal text.") {
+		t.Errorf("expected normal text after HTML block, got: %q", allText.String())
 	}
 }
 
@@ -1839,5 +1836,308 @@ func TestToMarkdown_EmptyTable(t *testing.T) {
 	// Empty table should produce no output.
 	if strings.Contains(string(md), "|") {
 		t.Errorf("empty table should not produce output, got %q", md)
+	}
+}
+
+func TestFromMarkdown_GFMTableParsed(t *testing.T) {
+	md := []byte("| A | B |\n| --- | --- |\n| 1 | 2 |\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// With GFM extension, the table should NOT be inserted as literal pipe text.
+	for _, req := range requests {
+		if req.InsertText != nil && strings.Contains(req.InsertText.Text, "| A |") {
+			t.Error("table was inserted as raw text; GFM table extension not active")
+		}
+	}
+}
+
+func TestToMarkdown_TaskList(t *testing.T) {
+	doc := makeDocWithLists(
+		map[string]docs.List{
+			"list1": {
+				ListProperties: &docs.ListProperties{
+					NestingLevels: []*docs.NestingLevel{
+						{GlyphType: "GLYPH_TYPE_UNSPECIFIED"},
+					},
+				},
+			},
+		},
+		makeListParagraph("list1", 0, textRun("☑ done task\n")),
+		makeListParagraph("list1", 0, textRun("☐ pending task\n")),
+	)
+
+	md, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := string(md)
+	if !strings.Contains(got, "- [x] done task") {
+		t.Errorf("expected checked task list item, got:\n%s", got)
+	}
+	if !strings.Contains(got, "- [ ] pending task") {
+		t.Errorf("expected unchecked task list item, got:\n%s", got)
+	}
+}
+
+func TestFromMarkdown_TaskList(t *testing.T) {
+	md := []byte("- [x] done\n- [ ] todo\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var allText strings.Builder
+	for _, req := range requests {
+		if req.InsertText != nil {
+			allText.WriteString(req.InsertText.Text)
+		}
+	}
+	combined := allText.String()
+	if !strings.Contains(combined, "☑") {
+		t.Errorf("missing checked checkbox (☑) in: %q", combined)
+	}
+	if !strings.Contains(combined, "☐") {
+		t.Errorf("missing unchecked checkbox (☐) in: %q", combined)
+	}
+}
+
+func TestFromMarkdown_TableInsert(t *testing.T) {
+	md := []byte("| A | B |\n| --- | --- |\n| 1 | 2 |\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have an InsertTable request with 2 rows and 2 columns.
+	var hasTable bool
+	for _, req := range requests {
+		if req.InsertTable != nil {
+			if req.InsertTable.Rows == 2 && req.InsertTable.Columns == 2 {
+				hasTable = true
+			}
+		}
+	}
+	if !hasTable {
+		t.Error("missing InsertTable request with 2 rows and 2 columns")
+	}
+}
+
+func TestFromMarkdown_TableCellContent(t *testing.T) {
+	md := []byte("| Name | Age |\n| --- | --- |\n| Alice | 30 |\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Collect all InsertText content to verify cell data is present.
+	var allText strings.Builder
+	for _, req := range requests {
+		if req.InsertText != nil {
+			allText.WriteString(req.InsertText.Text)
+		}
+	}
+	combined := allText.String()
+	for _, want := range []string{"Name", "Age", "Alice", "30"} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("missing cell content %q in: %q", want, combined)
+		}
+	}
+}
+
+func TestFromMarkdown_TableCellIndicesReverseOrder(t *testing.T) {
+	// Table cells must be inserted in reverse order so that earlier insertions
+	// don't shift the pre-computed indices of later cells.
+	md := []byte("| Name | Age |\n| --- | --- |\n| Alice | 30 |\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Collect cell InsertText requests (those that come after InsertTable).
+	var cellInserts []*docs.InsertTextRequest
+	pastTable := false
+	for _, req := range requests {
+		if req.InsertTable != nil {
+			pastTable = true
+			continue
+		}
+		if pastTable && req.InsertText != nil {
+			cellInserts = append(cellInserts, req.InsertText)
+		}
+	}
+
+	if len(cellInserts) < 2 {
+		t.Fatalf("expected at least 2 cell InsertText requests, got %d", len(cellInserts))
+	}
+
+	// Cell InsertText requests must be in descending index order so that
+	// each insertion doesn't shift the indices of subsequent (lower-index) cells.
+	for i := 1; i < len(cellInserts); i++ {
+		if cellInserts[i].Location.Index >= cellInserts[i-1].Location.Index {
+			t.Errorf("cell InsertText[%d] index %d >= InsertText[%d] index %d; must be in descending order",
+				i, cellInserts[i].Location.Index, i-1, cellInserts[i-1].Location.Index)
+		}
+	}
+}
+
+func TestFromMarkdown_TableCursorAdvancesCorrectly(t *testing.T) {
+	// After a table, the cursor must account for both the table structure
+	// and the text inserted into cells.
+	// 2x2 table with cells "A","B","1","2" (4 chars total).
+	// Empty table structure at cursor=1: 2 + 2*(2*2+1) + 1 = 13 index units.
+	// Total table footprint: 13 + 4 = 17. So cursor after table = 1 + 17 = 18.
+	md := []byte("| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfterX\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the InsertText containing "AfterX" — it should start at index 18.
+	var afterTableIdx int64 = -1
+	for _, req := range requests {
+		if req.InsertText != nil && strings.Contains(req.InsertText.Text, "AfterX") {
+			afterTableIdx = req.InsertText.Location.Index
+			break
+		}
+	}
+
+	if afterTableIdx == -1 {
+		t.Fatal("missing InsertText for 'AfterX'")
+	}
+	// Expected: cursor starts at 1, table structure = 13, cell text = 4, total = 18.
+	if afterTableIdx != 18 {
+		t.Errorf("'AfterX' index = %d, want 18 (1 + 13 structure + 4 cell text)", afterTableIdx)
+	}
+}
+
+func TestFromMarkdown_FormattingRequestOrder(t *testing.T) {
+	tests := []struct {
+		name       string
+		md         string
+		wantBold   bool
+		wantItalic bool
+		wantStrike bool
+		wantCode   bool
+	}{
+		{"bold", "**bold**\n", true, false, false, false},
+		{"italic", "*italic*\n", false, true, false, false},
+		{"bold+italic", "***both***\n", true, true, false, false},
+		{"strikethrough", "~~strike~~\n", false, false, true, false},
+		{"inline code", "`code`\n", false, false, false, true},
+		{"mixed", "**bold** and *italic*\n", true, true, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests, err := FromMarkdown([]byte(tt.md))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// Verify ordering: all InsertText before all UpdateParagraphStyle before all UpdateTextStyle.
+			phase := 0 // 0=inserts, 1=paraStyles, 2=textStyles
+			for _, req := range requests {
+				switch {
+				case req.InsertText != nil:
+					if phase > 0 {
+						t.Errorf("InsertText found after style requests")
+					}
+				case req.UpdateParagraphStyle != nil:
+					if phase > 1 {
+						t.Errorf("UpdateParagraphStyle found after UpdateTextStyle")
+					}
+					if phase == 0 {
+						phase = 1
+					}
+				case req.UpdateTextStyle != nil:
+					if phase < 2 {
+						phase = 2
+					}
+				}
+			}
+
+			var hasBold, hasItalic, hasStrike, hasCode bool
+			for _, req := range requests {
+				if req.UpdateTextStyle == nil {
+					continue
+				}
+				ts := req.UpdateTextStyle.TextStyle
+				fields := req.UpdateTextStyle.Fields
+				if ts.Bold && strings.Contains(fields, "bold") {
+					hasBold = true
+				}
+				if ts.Italic && strings.Contains(fields, "italic") {
+					hasItalic = true
+				}
+				if ts.Strikethrough && strings.Contains(fields, "strikethrough") {
+					hasStrike = true
+				}
+				if ts.WeightedFontFamily != nil && strings.Contains(fields, "weightedFontFamily") {
+					hasCode = true
+				}
+			}
+
+			if tt.wantBold && !hasBold {
+				t.Error("expected bold style request")
+			}
+			if tt.wantItalic && !hasItalic {
+				t.Error("expected italic style request")
+			}
+			if tt.wantStrike && !hasStrike {
+				t.Error("expected strikethrough style request")
+			}
+			if tt.wantCode && !hasCode {
+				t.Error("expected code (monospace) style request")
+			}
+		})
+	}
+}
+
+func TestFromMarkdown_TextStylesAfterParagraphStyles(t *testing.T) {
+	md := []byte("**bold text**\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the indices of the relevant requests.
+	lastParagraphStyleIdx := -1
+	firstTextStyleIdx := -1
+	lastInsertIdx := -1
+
+	for i, req := range requests {
+		if req.InsertText != nil {
+			lastInsertIdx = i
+		}
+		if req.UpdateParagraphStyle != nil {
+			lastParagraphStyleIdx = i
+		}
+		if req.UpdateTextStyle != nil && firstTextStyleIdx == -1 {
+			firstTextStyleIdx = i
+		}
+	}
+
+	if firstTextStyleIdx == -1 {
+		t.Fatal("no UpdateTextStyle requests found")
+	}
+	if lastParagraphStyleIdx == -1 {
+		t.Fatal("no UpdateParagraphStyle requests found")
+	}
+	if lastInsertIdx == -1 {
+		t.Fatal("no InsertText requests found")
+	}
+
+	// All inserts must come before all styles.
+	if lastInsertIdx >= firstTextStyleIdx {
+		t.Errorf("InsertText (index %d) must come before first UpdateTextStyle (index %d)", lastInsertIdx, firstTextStyleIdx)
+	}
+
+	// Paragraph styles must come before text styles.
+	if lastParagraphStyleIdx >= firstTextStyleIdx {
+		t.Errorf("UpdateParagraphStyle (index %d) must come before first UpdateTextStyle (index %d)", lastParagraphStyleIdx, firstTextStyleIdx)
 	}
 }
