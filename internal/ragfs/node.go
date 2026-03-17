@@ -112,6 +112,7 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 		out.Mode = syscall.S_IFREG | 0o644
 		out.Uid = d.uid
 		out.Gid = d.gid
+		out.Mtime = uint64(tf.mod.Unix())
 
 		child := d.NewInode(ctx, tf, fs.StableAttr{Mode: syscall.S_IFREG})
 		return child, nil, fuse.FOPEN_DIRECT_IO, fs.OK
@@ -186,13 +187,16 @@ func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 			return syscall.EIO
 		}
 		if !isTempFile(newName) {
-			// Promote: write temp content to the backend so it syncs.
+			// Promote: create the file in the backend, then write content.
 			tf.mu.Lock()
 			data := make([]byte, len(tf.data))
 			copy(data, tf.data)
 			tf.mu.Unlock()
 
 			newPath := path.Join(newDir.path, newName)
+			if _, err := d.handler.Create(ctx, newPath, false); err != nil {
+				return syscall.EIO
+			}
 			if err := d.handler.Write(ctx, newPath, data); err != nil {
 				return syscall.EIO
 			}
@@ -209,16 +213,26 @@ func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 			return fs.OK
 		}
 		// Temp-to-temp rename stays in-memory.
-		d.tempMu.Lock()
-		delete(d.tempFiles, name)
-		d.tempMu.Unlock()
-		newDir.tempMu.Lock()
-		if newDir.tempFiles == nil {
-			newDir.tempFiles = make(map[string]*TempFile)
+		if d == newDir {
+			// Same directory: single lock to avoid a window where the
+			// file is absent from the map.
+			d.tempMu.Lock()
+			delete(d.tempFiles, name)
+			tf.name = newName
+			d.tempFiles[newName] = tf
+			d.tempMu.Unlock()
+		} else {
+			d.tempMu.Lock()
+			delete(d.tempFiles, name)
+			d.tempMu.Unlock()
+			newDir.tempMu.Lock()
+			if newDir.tempFiles == nil {
+				newDir.tempFiles = make(map[string]*TempFile)
+			}
+			tf.name = newName
+			newDir.tempFiles[newName] = tf
+			newDir.tempMu.Unlock()
 		}
-		tf.name = newName
-		newDir.tempFiles[newName] = tf
-		newDir.tempMu.Unlock()
 		return fs.OK
 	}
 

@@ -431,6 +431,22 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("TempFile_HasMtime", func(t *testing.T) {
+		filePath := filepath.Join(mntDir, ".mtime-test.swp")
+		err := os.WriteFile(filePath, []byte("mtime data"), 0644)
+		if err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+
+		info, err := os.Stat(filePath)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		if info.ModTime().Unix() == 0 {
+			t.Error("temp file Mtime should be non-zero")
+		}
+	})
+
 	t.Run("TempFileRenamedToReal_SyncsToHandler", func(t *testing.T) {
 		h.reset()
 

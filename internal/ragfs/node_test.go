@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ type stubHandler struct {
 	writeCalled  bool
 	createEntry  *Entry
 	createErr    error
+	createCalled bool
 }
 
 func (h *stubHandler) Read(_ context.Context, _ string) ([]byte, error) {
@@ -45,10 +47,15 @@ func (h *stubHandler) Stat(_ context.Context, _ string) (*Entry, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 func (h *stubHandler) Create(_ context.Context, _ string, _ bool) (*Entry, error) {
+	h.createCalled = true
 	if h.createEntry != nil || h.createErr != nil {
 		return h.createEntry, h.createErr
 	}
-	return nil, fmt.Errorf("not implemented")
+	return &Entry{
+		Name:     "created",
+		MimeType: mimeGoogleDoc,
+		ModTime:  time.Now(),
+	}, nil
 }
 
 func TestFillAttrOut_GoogleDoc(t *testing.T) {
@@ -1305,6 +1312,237 @@ func TestDirRename_TempToNonTemp_InvalidatesCache(t *testing.T) {
 	// fetches the freshly-written content from the backend.
 	if cache.GetContent("/doc.md") != nil {
 		t.Error("cache for destination path should be invalidated after temp→non-temp rename")
+	}
+}
+
+// Issue #1: Promote path must call handler.Create before handler.Write.
+func TestDirRename_TempToNonTemp_CallsCreateBeforeWrite(t *testing.T) {
+	h := &stubHandler{}
+	d := &Dir{
+		handler:   h,
+		cache:     NewCache(),
+		path:      "/",
+		entry:     &Entry{IsDir: true},
+		uid:       501,
+		gid:       20,
+		tempFiles: make(map[string]*TempFile),
+	}
+
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	tf.data = []byte("# Promoted\n")
+	d.tempFiles[".doc.md.tmp"] = tf
+
+	errno := d.Rename(context.Background(), ".doc.md.tmp", d, "doc.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d", errno)
+	}
+
+	if !h.createCalled {
+		t.Error("Rename temp→non-temp must call handler.Create before handler.Write")
+	}
+}
+
+// Issue #2: Same-dir temp rename must be atomic (no window where file is absent).
+func TestDirRename_TempToTemp_SameDir_Atomic(t *testing.T) {
+	d := &Dir{
+		handler:   &stubHandler{},
+		cache:     NewCache(),
+		path:      "/",
+		entry:     &Entry{IsDir: true},
+		uid:       501,
+		gid:       20,
+		tempFiles: make(map[string]*TempFile),
+	}
+
+	tf := newTempFile(".doc.md.swp", 501, 20)
+	tf.data = []byte("swap content")
+	d.tempFiles[".doc.md.swp"] = tf
+
+	// Rename within same dir: .swp → .swo
+	errno := d.Rename(context.Background(), ".doc.md.swp", d, ".doc.md.swo", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d", errno)
+	}
+
+	d.tempMu.RLock()
+	_, oldExists := d.tempFiles[".doc.md.swp"]
+	_, newExists := d.tempFiles[".doc.md.swo"]
+	d.tempMu.RUnlock()
+
+	if oldExists {
+		t.Error("old temp name should be removed")
+	}
+	if !newExists {
+		t.Error("new temp name should exist")
+	}
+}
+
+// Issue #3: newTempFile must set mod time, and Dir.Create must use it for out.Mtime.
+// We can't call Dir.Create directly (it requires a FUSE bridge for NewInode),
+// so we verify that newTempFile sets mod, and the integration test verifies
+// the full Create path via a real FUSE mount.
+func TestNewTempFile_SetsMod(t *testing.T) {
+	before := time.Now()
+	tf := newTempFile(".test.swp", 501, 20)
+	after := time.Now()
+
+	if tf.mod.Before(before) || tf.mod.After(after) {
+		t.Errorf("newTempFile mod %v not in [%v, %v]", tf.mod, before, after)
+	}
+	if tf.mod.Unix() == 0 {
+		t.Error("newTempFile must set mod time, got zero")
+	}
+}
+
+func TestFile_Getattr_NilEntry(t *testing.T) {
+	f := &File{uid: 501, gid: 20}
+	var out fuse.AttrOut
+	errno := f.Getattr(context.Background(), nil, &out)
+	if errno != 0 {
+		t.Fatalf("Getattr returned errno %d", errno)
+	}
+	if out.Mode != syscall.S_IFREG|0o444 {
+		t.Errorf("mode = %o, want %o", out.Mode, syscall.S_IFREG|0o444)
+	}
+	if out.Uid != 501 || out.Gid != 20 {
+		t.Errorf("uid/gid = %d/%d, want 501/20", out.Uid, out.Gid)
+	}
+}
+
+func TestDirStream_Close(t *testing.T) {
+	ds := newDirStream([]Entry{{Name: "a.md", MimeType: mimeGoogleDoc}})
+	ds.Close() // should not panic
+}
+
+func TestDirStream_NextBeyondEnd(t *testing.T) {
+	ds := newDirStream([]Entry{})
+	_, errno := ds.Next()
+	if errno != syscall.ENOENT {
+		t.Errorf("Next on empty stream: errno = %d, want ENOENT", errno)
+	}
+}
+
+func TestDir_Getattr_NilEntry(t *testing.T) {
+	d := &Dir{uid: 501, gid: 20}
+	var out fuse.AttrOut
+	errno := d.Getattr(context.Background(), nil, &out)
+	if errno != 0 {
+		t.Fatalf("Getattr returned errno %d", errno)
+	}
+	if out.Mode != syscall.S_IFDIR|0o755 {
+		t.Errorf("mode = %o, want %o", out.Mode, syscall.S_IFDIR|0o755)
+	}
+	if out.Mtime == 0 {
+		t.Error("Mtime should be non-zero for nil entry")
+	}
+}
+
+func TestFile_Setattr_Truncate(t *testing.T) {
+	h := &stubHandler{readContent: []byte("original")}
+	c := NewCache()
+	f := &File{
+		handler: h,
+		cache:   c,
+		path:    "test.md",
+		entry:   &Entry{Name: "test.md", Size: 8},
+		uid:     501,
+		gid:     20,
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 0
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+	if f.entry.Size != 0 {
+		t.Errorf("entry.Size = %d, want 0", f.entry.Size)
+	}
+	if !f.dirty {
+		t.Error("file should be dirty after truncate")
+	}
+}
+
+func TestFile_Setattr_NonZeroSize(t *testing.T) {
+	h := &stubHandler{}
+	c := NewCache()
+	f := &File{
+		handler: h,
+		cache:   c,
+		path:    "test.md",
+		entry:   &Entry{Name: "test.md", Size: 8},
+		uid:     501,
+		gid:     20,
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 42
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+	if f.entry.Size != 42 {
+		t.Errorf("entry.Size = %d, want 42", f.entry.Size)
+	}
+}
+
+func TestFile_Setattr_NilEntry(t *testing.T) {
+	h := &stubHandler{}
+	c := NewCache()
+	f := &File{
+		handler: h,
+		cache:   c,
+		path:    "test.md",
+		uid:     501,
+		gid:     20,
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 0
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+}
+
+func TestFile_PersistLocked_NotDirty(t *testing.T) {
+	h := &stubHandler{}
+	f := &File{handler: h, cache: NewCache(), path: "test.md"}
+	// Not dirty — should be no-op.
+	errno := f.persistIfDirty(context.Background())
+	if errno != 0 {
+		t.Fatalf("persistIfDirty returned errno %d", errno)
+	}
+	if h.writeCalled {
+		t.Error("Write should not be called when not dirty")
+	}
+}
+
+func TestFile_PersistLocked_WriteError(t *testing.T) {
+	h := &stubHandler{writeErr: fmt.Errorf("write failed")}
+	var logBuf bytes.Buffer
+	logger := log.New(&logBuf, "", 0)
+	f := &File{
+		handler:     h,
+		cache:       NewCache(),
+		path:        "test.md",
+		dirty:       true,
+		pendingData: []byte("data"),
+		logger:      logger,
+	}
+
+	errno := f.persistIfDirty(context.Background())
+	if errno != syscall.EIO {
+		t.Fatalf("persistIfDirty returned errno %d, want EIO", errno)
+	}
+	if !strings.Contains(logBuf.String(), "write failed") {
+		t.Error("expected error to be logged")
 	}
 }
 
