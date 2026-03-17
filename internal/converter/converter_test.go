@@ -922,6 +922,76 @@ func TestFromMarkdown_ComplexUnicode(t *testing.T) {
 	}
 }
 
+func TestUTF16CodeUnits_Sanitized(t *testing.T) {
+	// After sanitization, null bytes and control characters should be stripped.
+	// This test verifies sanitizeForDocs produces clean strings.
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"null_byte", "hello\x00world", "helloworld"},
+		{"control_chars", "line\x01\x02\x03end", "lineend"},
+		{"keeps_tab", "col1\tcol2", "col1\tcol2"},
+		{"keeps_newline", "line1\nline2", "line1\nline2"},
+		{"keeps_cr", "line1\rline2", "line1\rline2"},
+		{"mixed", "ok\x00\x01\tnewline\n\x7Fend", "ok\tnewline\nend"},
+		{"empty", "", ""},
+		{"all_valid", "Hello 🤷 world!", "Hello 🤷 world!"},
+		{"surrogate_half", "before\xED\xA0\x80after", "before\uFFFD\uFFFD\uFFFDafter"}, // invalid UTF-8: 3 bad bytes → 3 U+FFFD
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeForDocs(tt.in)
+			if got != tt.want {
+				t.Errorf("sanitizeForDocs(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFromMarkdown_NullByteStripped(t *testing.T) {
+	// Markdown with embedded null byte should not produce InsertText with \x00.
+	md := []byte("Hello\x00World\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, req := range requests {
+		if req.InsertText != nil {
+			for _, b := range req.InsertText.Text {
+				if b == 0 {
+					t.Fatal("InsertText contains null byte — Google Docs API will reject this")
+				}
+			}
+		}
+	}
+}
+
+func TestFromMarkdown_ControlCharsStripped(t *testing.T) {
+	// Control characters (except \t, \n, \r) should be stripped.
+	md := []byte("before\x01\x02\x03after\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, req := range requests {
+		if req.InsertText != nil {
+			for _, r := range req.InsertText.Text {
+				if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+					t.Fatalf("InsertText contains control char U+%04X — Google Docs API will reject this", r)
+				}
+				if r == 0x7F {
+					t.Fatal("InsertText contains DEL (U+007F)")
+				}
+			}
+		}
+	}
+}
+
 func TestFromMarkdown_Empty(t *testing.T) {
 	requests, err := FromMarkdown([]byte(""))
 	if err != nil {

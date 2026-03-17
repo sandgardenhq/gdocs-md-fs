@@ -55,6 +55,7 @@ type requestBuilder struct {
 // advances the cursor. It also applies any pending inline styles to the
 // inserted range.
 func (b *requestBuilder) insertText(s string) {
+	s = sanitizeForDocs(s)
 	if s == "" {
 		return
 	}
@@ -102,6 +103,29 @@ func utf16CodeUnits(s string) int {
 		}
 	}
 	return n
+}
+
+// sanitizeForDocs strips characters that the Google Docs API rejects:
+// null bytes, C0/C1 control characters (except tab, newline, carriage return),
+// DEL, and replaces invalid UTF-8 sequences with U+FFFD.
+func sanitizeForDocs(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t', r == '\n', r == '\r':
+			b.WriteRune(r)
+		case r < 0x20: // C0 control characters (includes null)
+			continue
+		case r == 0x7F: // DEL
+			continue
+		case r >= 0x80 && r <= 0x9F: // C1 control characters
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // applyTextStyle appends UpdateTextStyle requests for any active inline styles.
