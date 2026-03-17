@@ -96,10 +96,11 @@ func (s *Server) Mount() error {
 			Mode:    os.ModeDir | 0o755,
 			ModTime: time.Now(),
 		},
-		uid:    s.uid,
-		gid:    s.gid,
-		server: s,
-		logger: s.logger,
+		uid:       s.uid,
+		gid:       s.gid,
+		server:    s,
+		logger:    s.logger,
+		tempFiles: make(map[string]*TempFile),
 	}
 
 	timeout := time.Second
