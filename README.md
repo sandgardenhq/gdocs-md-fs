@@ -18,7 +18,7 @@ flowchart LR
 | Google Drive type | Appears as | Read | Write |
 |---|---|---|---|
 | Google Docs | `filename.md` | Converted to Markdown | Markdown parsed back to Doc |
-| Folders | `directory/` | Directory listing | Create/delete supported |
+| Folders | `directory/` | Directory listing | Create/rename/delete supported |
 | PDFs | `filename.pdf` | Binary download | No |
 | Images | `filename.png` | Binary download | No |
 | Other files | `filename.ext` | Binary download | No |
@@ -44,19 +44,19 @@ gdocs-md caches both metadata and file contents in memory to keep reads fast:
 - **Metadata cache** (default 30s TTL): directory listings and file stats
 - **Content cache** (default 60s TTL, 100MB LRU): file contents
 
-Writes are write-through — the cache and Google Drive are updated together. Repeated reads of the same file resolve in under 200ms.
+Writes are buffered in memory and persisted to Google Drive when the file descriptor is closed (`Flush`), with a periodic background sync (1s interval) as a safety net for editors that hold files open. Repeated reads of the same file resolve in under 200ms.
 
 ### Error handling
 
 - **Network errors**: return I/O error to the filesystem, log the issue, keep cached data
 - **Auth errors**: return permission denied, prompt re-authentication
 - **Rate limiting** (HTTP 429/5xx): exponential backoff with jitter, up to 5 retries
-- **Concurrent edits**: last write wins (with a warning logged)
+- **Concurrent edits**: when a dirty file is re-opened, the remote is re-fetched and compared to the baseline read at first open. If the remote has changed, local edits are discarded and the open returns `ESTALE` rather than overwriting the newer remote version.
 
 ## Requirements
 
 - **Go 1.25+** (for building from source)
-- **FUSE**: macOS includes FUSE support natively; on Linux, install `libfuse-dev` (or `fuse3`)
+- **FUSE**: macOS requires [macFUSE](https://macfuse.github.io/); on Linux, install `libfuse-dev` (or `fuse3`)
 - **Google Cloud project** with OAuth 2.0 credentials (see [Setup](#setup) below)
 
 ## Installation
@@ -107,7 +107,7 @@ cp ~/Downloads/client_secret_*.json ~/.config/gdocs-md/credentials.json
 gdocs-md auth
 ```
 
-This opens an OAuth consent screen in your browser. Grant access and paste the authorization code back into the terminal. The token is saved to `~/.config/gdocs-md/token.json` with 0600 permissions. Tokens refresh automatically.
+This starts a local HTTP server on a random `localhost` port and opens an OAuth consent screen in your browser. Grant access and the browser is redirected back to the local server, which captures the authorization code automatically — no copy-paste required. The token is saved to `~/.config/gdocs-md/token.json` (or `$XDG_CONFIG_HOME/gdocs-md/token.json` if set) with 0600 permissions. Tokens refresh automatically.
 
 **Scopes requested:**
 - `drive.file` — edit files created or opened by the app
@@ -175,13 +175,14 @@ fusermount -u ~/drive
 gdocs-md mount [flags] <folder-id> <mountpoint>
 
 Flags:
-  --cache-size string   Max in-memory cache size (default "100MB")
-  --cache-ttl duration  Content cache TTL (default 60s)
-  --meta-ttl duration   Metadata cache TTL (default 30s)
-  --foreground          Run in foreground, don't daemonize
+  --cache-size string   Maximum in-memory cache size (default "100MB")
+  --cache-ttl duration  Cache TTL for content (default 60s)
+  --meta-ttl duration   Cache TTL for metadata (default 30s)
   --read-only           Mount as read-only
-  -v, --verbose         Enable verbose logging
+  -v, --verbose         Enable verbose logging (persistent flag, available on all subcommands)
 ```
+
+`--cache-size` accepts case-insensitive suffixes `B`, `KB`, `MB`, `GB`, `TB`, or a plain number for bytes.
 
 Examples:
 
@@ -191,9 +192,6 @@ gdocs-md mount --cache-size 1GB --cache-ttl 5m abc123 ~/drive
 
 # Read-only mount with verbose logging
 gdocs-md mount --read-only --verbose abc123 ~/drive
-
-# Foreground mode for debugging
-gdocs-md mount --foreground --verbose abc123 ~/drive
 ```
 
 ### Check version
@@ -243,3 +241,7 @@ go test -v -race ./...
 # Build
 ./scripts/build.sh
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
