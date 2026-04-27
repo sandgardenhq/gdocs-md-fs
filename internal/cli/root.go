@@ -12,7 +12,7 @@ var verbose bool
 // registered.
 func NewRootCmd() *cobra.Command {
 	rootCmd = &cobra.Command{
-		Use:   "gdocs-md",
+		Use:   "gdocs-md-fs",
 		Short: "Mount Google Drive as a local filesystem with Docs as Markdown",
 	}
 

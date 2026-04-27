@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/brittcrawford/gdocs-md/internal/cli"
+	"github.com/brittcrawford/gdocs-md-fs/internal/cli"
 )
 
 func main() {

@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/brittcrawford/gdocs-md/internal/gdrive"
-	"github.com/brittcrawford/gdocs-md/internal/ragfs"
+	"github.com/brittcrawford/gdocs-md-fs/internal/gdrive"
+	"github.com/brittcrawford/gdocs-md-fs/internal/ragfs"
 	"github.com/spf13/cobra"
 )
 
@@ -28,7 +28,7 @@ func newMountCmd() *cobra.Command {
 		Use:     "mount <folder-id> <mountpoint>",
 		Short:   "Mount a Google Drive folder as a local directory",
 		Args:    cobra.ExactArgs(2),
-		Example: "  gdocs-md mount abc123 ~/drive",
+		Example: "  gdocs-md-fs mount abc123 ~/drive",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			folderID := args[0]
 			mountpoint := args[1]
@@ -43,7 +43,7 @@ func newMountCmd() *cobra.Command {
 			store := gdrive.NewTokenStore()
 			token, err := store.LoadToken()
 			if err != nil {
-				return fmt.Errorf("failed to load token (run 'gdocs-md auth' first): %w", err)
+				return fmt.Errorf("failed to load token (run 'gdocs-md-fs auth' first): %w", err)
 			}
 
 			// Create OAuth config and token source.

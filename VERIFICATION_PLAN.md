@@ -4,7 +4,7 @@
 
 - **Google Cloud project** with OAuth 2.0 credentials (Desktop application type)
 - **Google Drive API** and **Google Docs API** enabled
-- Credentials saved to `~/.config/gdocs-md/credentials.json`
+- Credentials saved to `~/.config/gdocs-md-fs/credentials.json`
 - **Test Google Drive folder** containing:
   - At least 2 Google Docs with mixed formatting (headings, bold, italic, lists, tables, code blocks)
   - 1 PDF file
@@ -12,7 +12,7 @@
   - 1 other binary file (e.g., .zip)
   - 1 subfolder with at least 1 Google Doc inside
 - **FUSE support** available on the test machine (macOS native or Linux libfuse)
-- `gdocs-md` binary built successfully (`go build -o gdocs-md ./cmd/gdocs-md`)
+- `gdocs-md-fs` binary built successfully (`go build -o gdocs-md-fs ./cmd/gdocs-md-fs`)
 - `golangci-lint` installed
 
 **Test folder ID**: _[TODO: fill in after creating test folder]_
@@ -21,12 +21,12 @@
 
 ### Scenario 1: Authentication
 
-**Context**: No token exists yet (`~/.config/gdocs-md/token.json` does not exist).
+**Context**: No token exists yet (`~/.config/gdocs-md-fs/token.json` does not exist).
 
 **Steps**:
-1. Run `gdocs-md auth`
+1. Run `gdocs-md-fs auth`
 2. Complete the OAuth flow in the browser
-3. Check that `~/.config/gdocs-md/token.json` was created
+3. Check that `~/.config/gdocs-md-fs/token.json` was created
 
 **Success Criteria**:
 - [ ] OAuth consent screen opens in browser
@@ -41,7 +41,7 @@
 
 **Steps**:
 1. Create a mountpoint: `mkdir -p /tmp/gdocs-test`
-2. Run `gdocs-md mount <test-folder-id> /tmp/gdocs-test`
+2. Run `gdocs-md-fs mount <test-folder-id> /tmp/gdocs-test`
 3. List the mounted directory: `ls /tmp/gdocs-test/`
 4. Read a Google Doc: `cat /tmp/gdocs-test/<doc-name>.md`
 5. Verify markdown output contains expected formatting
@@ -62,7 +62,7 @@
 
 **Steps**:
 1. Read the original Doc: `cat /tmp/gdocs-test/<doc-name>.md > /tmp/original.md`
-2. Append a new section: `echo -e "\n## Verification Test\n\nThis section was added by gdocs-md." >> /tmp/gdocs-test/<doc-name>.md`
+2. Append a new section: `echo -e "\n## Verification Test\n\nThis section was added by gdocs-md-fs." >> /tmp/gdocs-test/<doc-name>.md`
 3. Wait a moment, then re-read: `cat /tmp/gdocs-test/<doc-name>.md`
 4. Open the Google Doc in a browser and verify the new section appears
 5. Remove the test section from the Google Doc in the browser

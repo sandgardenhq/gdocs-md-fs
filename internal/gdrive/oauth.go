@@ -33,18 +33,18 @@ type TokenStore struct {
 	path string
 }
 
-// configDir returns the configuration directory for gdocs-md.
-// It prefers $XDG_CONFIG_HOME/gdocs-md/ and falls back to ~/.config/gdocs-md/.
+// configDir returns the configuration directory for gdocs-md-fs.
+// It prefers $XDG_CONFIG_HOME/gdocs-md-fs/ and falls back to ~/.config/gdocs-md-fs/.
 func configDir() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "gdocs-md")
+		return filepath.Join(xdg, "gdocs-md-fs")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		// Last resort fallback.
-		return filepath.Join(".config", "gdocs-md")
+		return filepath.Join(".config", "gdocs-md-fs")
 	}
-	return filepath.Join(home, ".config", "gdocs-md")
+	return filepath.Join(home, ".config", "gdocs-md-fs")
 }
 
 // NewTokenStore returns a TokenStore that persists tokens to the standard

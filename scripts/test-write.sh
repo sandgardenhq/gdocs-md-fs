@@ -7,7 +7,7 @@ set -euo pipefail
 
 FOLDER_ID="${1:?Usage: $0 <folder-id> [mountpoint]}"
 MOUNTPOINT="${2:-/tmp/gdocs-test}"
-BINARY="$(cd "$(dirname "$0")/.." && pwd)/gdocs-md"
+BINARY="$(cd "$(dirname "$0")/.." && pwd)/gdocs-md-fs"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -59,7 +59,7 @@ trap cleanup EXIT
 
 # Build
 info "Building binary..."
-(cd "$(dirname "$0")/.." && go build -o gdocs-md ./cmd/gdocs-md)
+(cd "$(dirname "$0")/.." && go build -o gdocs-md-fs ./cmd/gdocs-md-fs)
 
 if [[ ! -x "$BINARY" ]]; then
     echo "Binary not found at $BINARY"

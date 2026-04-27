@@ -1,4 +1,6 @@
-# gdocs-md
+# gdocs-md-fs
+
+**Google Docs to Markdown File System.**
 
 Mount Google Drive as a local FUSE filesystem where Google Docs appear as editable Markdown files. Edit a `.md` file on your machine and the changes sync back to Google Docs, preserving formatting like headings, bold, italic, lists, tables, and code blocks.
 
@@ -6,11 +8,11 @@ Other file types (PDFs, images, etc.) are accessible as read-only pass-through f
 
 ## How it works
 
-gdocs-md uses [FUSE](https://en.wikipedia.org/wiki/Filesystem_in_Userspace) to present a Google Drive folder as a regular directory on your machine. When you open a Google Doc, gdocs-md fetches it via the Google Docs API, converts the structured document to Markdown, and returns it as a `.md` file. When you save, the Markdown is parsed back into Google Docs API requests that update the document in place.
+gdocs-md-fs uses [FUSE](https://en.wikipedia.org/wiki/Filesystem_in_Userspace) to present a Google Drive folder as a regular directory on your machine. When you open a Google Doc, gdocs-md-fs fetches it via the Google Docs API, converts the structured document to Markdown, and returns it as a `.md` file. When you save, the Markdown is parsed back into Google Docs API requests that update the document in place.
 
 ```mermaid
 flowchart LR
-    A["Local editor<br/>(vim, VS Code)"] <--> B["FUSE filesystem<br/>(gdocs-md mount)"] <--> C["Google Drive<br/>+ Docs API"]
+    A["Local editor<br/>(vim, VS Code)"] <--> B["FUSE filesystem<br/>(gdocs-md-fs mount)"] <--> C["Google Drive<br/>+ Docs API"]
 ```
 
 ### File type mapping
@@ -39,7 +41,7 @@ Monospace-font paragraphs in Google Docs (Courier New, Consolas, etc.) are detec
 
 ### Caching
 
-gdocs-md caches both metadata and file contents in memory to keep reads fast:
+gdocs-md-fs caches both metadata and file contents in memory to keep reads fast:
 
 - **Metadata cache** (default 30s TTL): directory listings and file stats
 - **Content cache** (default 60s TTL, 100MB LRU): file contents
@@ -66,9 +68,9 @@ Writes are buffered in memory and persisted to Google Drive when the file descri
 ```bash
 # Clone and build
 git clone <repo-url>
-cd gdocs-md
+cd gdocs-md-fs
 
-# Build (outputs to bin/gdocs-md)
+# Build (outputs to bin/gdocs-md-fs)
 ./scripts/build.sh
 
 # Or install to $GOPATH/bin (or /usr/local/bin)
@@ -80,7 +82,7 @@ The build script embeds the git tag, commit hash, and build timestamp into the b
 ### Manual build
 
 ```bash
-go build -o gdocs-md ./cmd/gdocs-md
+go build -o gdocs-md-fs ./cmd/gdocs-md-fs
 ```
 
 ## Setup
@@ -97,17 +99,17 @@ go build -o gdocs-md ./cmd/gdocs-md
 ### 2. Save credentials
 
 ```bash
-mkdir -p ~/.config/gdocs-md
-cp ~/Downloads/client_secret_*.json ~/.config/gdocs-md/credentials.json
+mkdir -p ~/.config/gdocs-md-fs
+cp ~/Downloads/client_secret_*.json ~/.config/gdocs-md-fs/credentials.json
 ```
 
 ### 3. Authenticate
 
 ```bash
-gdocs-md auth
+gdocs-md-fs auth
 ```
 
-This starts a local HTTP server on a random `localhost` port and opens an OAuth consent screen in your browser. Grant access and the browser is redirected back to the local server, which captures the authorization code automatically — no copy-paste required. The token is saved to `~/.config/gdocs-md/token.json` (or `$XDG_CONFIG_HOME/gdocs-md/token.json` if set) with 0600 permissions. Tokens refresh automatically.
+This starts a local HTTP server on a random `localhost` port and opens an OAuth consent screen in your browser. Grant access and the browser is redirected back to the local server, which captures the authorization code automatically — no copy-paste required. The token is saved to `~/.config/gdocs-md-fs/token.json` (or `$XDG_CONFIG_HOME/gdocs-md-fs/token.json` if set) with 0600 permissions. Tokens refresh automatically.
 
 **Scopes requested:**
 - `drive.file` — edit files created or opened by the app
@@ -121,14 +123,14 @@ This starts a local HTTP server on a random `localhost` port and opens an OAuth 
 ```bash
 # Get the folder ID from the Google Drive URL:
 # https://drive.google.com/drive/folders/FOLDER_ID_HERE
-gdocs-md mount <folder-id> <mountpoint>
+gdocs-md-fs mount <folder-id> <mountpoint>
 ```
 
 Example:
 
 ```bash
 mkdir -p ~/drive
-gdocs-md mount 1aBcDeFgHiJkLmNoPqRsTuVwXyZ ~/drive
+gdocs-md-fs mount 1aBcDeFgHiJkLmNoPqRsTuVwXyZ ~/drive
 ```
 
 The folder contents appear at `~/drive/`. Google Docs show up as `.md` files.
@@ -172,7 +174,7 @@ fusermount -u ~/drive
 ### Options
 
 ```
-gdocs-md mount [flags] <folder-id> <mountpoint>
+gdocs-md-fs mount [flags] <folder-id> <mountpoint>
 
 Flags:
   --cache-size string   Maximum in-memory cache size (default "100MB")
@@ -188,22 +190,22 @@ Examples:
 
 ```bash
 # Large cache, longer TTL for slow connections
-gdocs-md mount --cache-size 1GB --cache-ttl 5m abc123 ~/drive
+gdocs-md-fs mount --cache-size 1GB --cache-ttl 5m abc123 ~/drive
 
 # Read-only mount with verbose logging
-gdocs-md mount --read-only --verbose abc123 ~/drive
+gdocs-md-fs mount --read-only --verbose abc123 ~/drive
 ```
 
 ### Check version
 
 ```bash
-gdocs-md version
-# gdocs-md version v1.0.0 (commit: abc1234, built: 2025-03-12T10:30:00Z)
+gdocs-md-fs version
+# gdocs-md-fs version v1.0.0 (commit: abc1234, built: 2025-03-12T10:30:00Z)
 ```
 
 ## Architecture
 
-gdocs-md is built in three layers:
+gdocs-md-fs is built in three layers:
 
 **CLI** (`internal/cli/`) — Cobra-based command parsing, signal handling, and flag definitions.
 
@@ -227,7 +229,7 @@ type Handler interface {
 }
 ```
 
-This abstraction means gdocs-md's FUSE layer could be reused for other cloud storage backends by implementing a different Handler.
+This abstraction means gdocs-md-fs's FUSE layer could be reused for other cloud storage backends by implementing a different Handler.
 
 ## Development
 

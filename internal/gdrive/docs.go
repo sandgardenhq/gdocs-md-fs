@@ -3,7 +3,7 @@ package gdrive
 import (
 	"fmt"
 
-	"github.com/brittcrawford/gdocs-md/internal/converter"
+	"github.com/brittcrawford/gdocs-md-fs/internal/converter"
 	"google.golang.org/api/docs/v1"
 )
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# build.sh — Build the gdocs-md binary with embedded version information.
+# build.sh — Build the gdocs-md-fs binary with embedded version information.
 #
 # Usage:
 #   ./scripts/build.sh [VERSION]
@@ -27,12 +27,12 @@ DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 # ---------------------------------------------------------------------------
 # Output binary path
 # ---------------------------------------------------------------------------
-OUTPUT="bin/gdocs-md"
+OUTPUT="bin/gdocs-md-fs"
 
 # ---------------------------------------------------------------------------
 # Linker flags — embed version info and strip debug symbols
 # ---------------------------------------------------------------------------
-MODULE="github.com/brittcrawford/gdocs-md/internal/cli"
+MODULE="github.com/brittcrawford/gdocs-md-fs/internal/cli"
 LDFLAGS="-s -w"
 LDFLAGS="${LDFLAGS} -X ${MODULE}.Version=${VERSION}"
 LDFLAGS="${LDFLAGS} -X ${MODULE}.Commit=${COMMIT}"
@@ -46,7 +46,7 @@ mkdir -p bin
 # ---------------------------------------------------------------------------
 # Print build summary
 # ---------------------------------------------------------------------------
-echo "Building gdocs-md"
+echo "Building gdocs-md-fs"
 echo "  Version : ${VERSION}"
 echo "  Commit  : ${COMMIT}"
 echo "  Date    : ${DATE}"
@@ -62,6 +62,6 @@ echo ""
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
-go build -ldflags "${LDFLAGS}" -o "${OUTPUT}" ./cmd/gdocs-md
+go build -ldflags "${LDFLAGS}" -o "${OUTPUT}" ./cmd/gdocs-md-fs
 
 echo "Build complete: ${OUTPUT}"

@@ -526,7 +526,7 @@ Expected: No errors or warnings
 
 **Step 4: Build**
 
-Run: `cd /Users/brittcrawford/conductor/workspaces/md-to-gdocs/munich && go build -o gdocs-md ./cmd/gdocs-md`
+Run: `cd /Users/brittcrawford/conductor/workspaces/md-to-gdocs/munich && go build -o gdocs-md-fs ./cmd/gdocs-md-fs`
 Expected: Build succeeds
 
 **Step 5: Final commit if any cleanup was needed**
