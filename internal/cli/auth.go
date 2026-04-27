@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/brittcrawford/gdocs-md/internal/gdrive"
+	"github.com/brittcrawford/gdocs-md-fs/internal/gdrive"
 	"github.com/spf13/cobra"
 )
 

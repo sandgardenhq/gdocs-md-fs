@@ -15,14 +15,14 @@ interactive: yes
 completionGateScript: go test ./...
 ---
 
-A Go CLI tool (`gdocs-md`) that mounts Google Drive as a local FUSE filesystem, presenting Google Docs as editable markdown files. Built on the `ragfs` framework which handles FUSE integration and caching.
+A Go CLI tool (`gdocs-md-fs`) that mounts Google Drive as a local FUSE filesystem, presenting Google Docs as editable markdown files. Built on the `ragfs` framework which handles FUSE integration and caching.
 
 See `Design.md` for full architecture, handler interface, and phased MVP scope.
 
 ## Success Criteria
 
 - [x] Users can authenticate with Google Drive via OAuth and have tokens stored securely in their config directory
-- [x] A Google Drive folder can be mounted as a local filesystem directory using `gdocs-md mount`
+- [x] A Google Drive folder can be mounted as a local filesystem directory using `gdocs-md-fs mount`
 - [x] Google Docs appear as `.md` files and their content is readable as markdown
 - [x] Editing and saving a `.md` file updates the corresponding Google Doc in Drive
 - [x] Deleting a mounted file removes the corresponding document from Google Drive

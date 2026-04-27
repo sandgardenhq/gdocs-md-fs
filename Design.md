@@ -1,14 +1,14 @@
-# Design: gdocs-md
+# Design: gdocs-md-fs
 
-A Go CLI tool that mounts Google Drive as a local FUSE filesystem, presenting Google Docs as editable markdown files.
+**Google Docs to Markdown File System.** A Go CLI tool that mounts Google Drive as a local FUSE filesystem, presenting Google Docs as editable markdown files.
 
 ## Architecture Overview
 
 ```
 +-------------------+     +-------------------+     +-------------------+
 |   CLI (cobra)     | --> |   ragfs (FUSE +   | --> |   Google Drive    |
-|   gdocs-md mount  |     |   caching layer)  |     |   Handler         |
-|   gdocs-md auth   |     |                   |     |                   |
+|   gdocs-md-fs mount  |     |   caching layer)  |     |   Handler         |
+|   gdocs-md-fs auth   |     |                   |     |                   |
 +-------------------+     +-------------------+     +-------------------+
                                                             |
                                     +-------------------+   |   +-------------------+
@@ -20,9 +20,9 @@ A Go CLI tool that mounts Google Drive as a local FUSE filesystem, presenting Go
 ### Package Layout
 
 ```
-gdocs-md/
+gdocs-md-fs/
   cmd/
-    gdocs-md/
+    gdocs-md-fs/
       main.go              # Entry point
   internal/
     cli/
@@ -134,9 +134,9 @@ type Cache struct {
 
 - Uses Google OAuth 2.0 with offline access for refresh tokens
 - Scopes: `drive.file`, `drive.readonly`, `documents`
-- Token stored in `$XDG_CONFIG_HOME/gdocs-md/token.json` (or `~/.config/gdocs-md/token.json`)
-- Client credentials in `$XDG_CONFIG_HOME/gdocs-md/credentials.json`
-- `gdocs-md auth` launches browser-based OAuth flow, stores token
+- Token stored in `$XDG_CONFIG_HOME/gdocs-md-fs/token.json` (or `~/.config/gdocs-md-fs/token.json`)
+- Client credentials in `$XDG_CONFIG_HOME/gdocs-md-fs/credentials.json`
+- `gdocs-md-fs auth` launches browser-based OAuth flow, stores token
 
 ### File Type Mapping
 
@@ -192,8 +192,8 @@ Parse markdown with goldmark, then generate `documents.batchUpdate` requests:
 ## Phased MVP Scope
 
 ### Phase 1: Auth + Read-Only Mount (Core)
-- OAuth 2.0 authentication flow (`gdocs-md auth`)
-- Mount a single Google Drive folder (`gdocs-md mount <folder-id> <mountpoint>`)
+- OAuth 2.0 authentication flow (`gdocs-md-fs auth`)
+- Mount a single Google Drive folder (`gdocs-md-fs mount <folder-id> <mountpoint>`)
 - List files in the folder as FUSE directory entries
 - Read Google Docs as markdown files
 - Read PDFs and images as pass-through files
@@ -233,10 +233,10 @@ Parse markdown with goldmark, then generate `documents.batchUpdate` requests:
 ## CLI Interface
 
 ```
-gdocs-md - Mount Google Drive as a local filesystem with Docs as Markdown
+gdocs-md-fs - Mount Google Drive as a local filesystem with Docs as Markdown
 
 Usage:
-  gdocs-md [command]
+  gdocs-md-fs [command]
 
 Commands:
   auth     Authenticate with Google Drive via OAuth
@@ -247,9 +247,9 @@ Flags:
   -v, --verbose   Enable verbose logging
 
 Examples:
-  gdocs-md auth
-  gdocs-md mount <folder-id> ~/drive
-  gdocs-md mount --cache-size 200MB <folder-id> ~/drive
+  gdocs-md-fs auth
+  gdocs-md-fs mount <folder-id> ~/drive
+  gdocs-md-fs mount --cache-size 200MB <folder-id> ~/drive
 ```
 
 ### Mount Command Flags

@@ -1,6 +1,6 @@
 ## Project Overview
 
-**gdocs-md**: Mount Google Drive as a local FUSE filesystem where Google Docs appear as editable Markdown files.
+**gdocs-md-fs**: Mount Google Drive as a local FUSE filesystem where Google Docs appear as editable Markdown files.
 
 ### Problem
 
@@ -33,7 +33,7 @@ go test -v -race ./...
 go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
 
 # Build
-go build -o gdocs-md ./cmd/gdocs-md
+go build -o gdocs-md-fs ./cmd/gdocs-md-fs
 
 # Lint
 golangci-lint run ./...

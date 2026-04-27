@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# install.sh — Install the gdocs-md binary to a directory on $PATH.
+# install.sh — Install the gdocs-md-fs binary to a directory on $PATH.
 #
 # Usage:
 #   ./scripts/install.sh
@@ -9,7 +9,7 @@ set -euo pipefail
 # The script will:
 #   1. Build the binary if it has not been built yet.
 #   2. Copy it to $GOPATH/bin (preferred) or /usr/local/bin (fallback).
-#   3. Verify the installation by running `gdocs-md version`.
+#   3. Verify the installation by running `gdocs-md-fs version`.
 
 # ---------------------------------------------------------------------------
 # Navigate to project root (parent of the scripts/ directory)
@@ -19,8 +19,8 @@ cd "$(dirname "$0")/.."
 # ---------------------------------------------------------------------------
 # Ensure the binary exists — build it if necessary
 # ---------------------------------------------------------------------------
-if [[ ! -f "bin/gdocs-md" ]]; then
-    echo "Binary not found at bin/gdocs-md, building first..."
+if [[ ! -f "bin/gdocs-md-fs" ]]; then
+    echo "Binary not found at bin/gdocs-md-fs, building first..."
     echo ""
     bash scripts/build.sh
     echo ""
@@ -49,25 +49,25 @@ fi
 # ---------------------------------------------------------------------------
 # Copy binary to the install directory
 # ---------------------------------------------------------------------------
-echo "Installing gdocs-md to ${INSTALL_DIR} ..."
+echo "Installing gdocs-md-fs to ${INSTALL_DIR} ..."
 
 if [[ -w "${INSTALL_DIR}" ]]; then
-    cp bin/gdocs-md "${INSTALL_DIR}/gdocs-md"
+    cp bin/gdocs-md-fs "${INSTALL_DIR}/gdocs-md-fs"
 else
     echo "(requires elevated privileges)"
-    sudo cp bin/gdocs-md "${INSTALL_DIR}/gdocs-md"
+    sudo cp bin/gdocs-md-fs "${INSTALL_DIR}/gdocs-md-fs"
 fi
 
 # ---------------------------------------------------------------------------
 # Verify installation
 # ---------------------------------------------------------------------------
-if command -v gdocs-md &>/dev/null; then
+if command -v gdocs-md-fs &>/dev/null; then
     echo ""
     echo "Installed version:"
-    gdocs-md version
+    gdocs-md-fs version
 else
     echo ""
-    echo "Warning: gdocs-md was copied to ${INSTALL_DIR} but is not on your PATH."
+    echo "Warning: gdocs-md-fs was copied to ${INSTALL_DIR} but is not on your PATH."
     echo "Add ${INSTALL_DIR} to your PATH and try again."
 fi
 
@@ -75,8 +75,8 @@ fi
 # Success
 # ---------------------------------------------------------------------------
 echo ""
-echo "gdocs-md installed successfully to ${INSTALL_DIR}"
+echo "gdocs-md-fs installed successfully to ${INSTALL_DIR}"
 echo ""
 echo "Quick start:"
-echo "  1. gdocs-md auth           # Authenticate with Google Drive"
-echo "  2. gdocs-md mount ID ~/drive  # Mount a Drive folder"
+echo "  1. gdocs-md-fs auth           # Authenticate with Google Drive"
+echo "  2. gdocs-md-fs mount ID ~/drive  # Mount a Drive folder"
