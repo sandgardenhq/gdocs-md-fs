@@ -608,18 +608,20 @@ func (b *requestBuilder) handleTable(table ast.Node, source []byte) {
 		},
 	})
 
-	// The InsertTable API inserts a newline before the table.
-	// Table body starts at cursor + 2.
-	// Each cell occupies 2 index units (paragraph start + newline).
-	// Each row has an additional 1 index unit overhead for the row boundary.
-	// Cell (r, c) paragraph start = tableBodyStart + r*(numCols*2+1) + c*2
+	// InsertTable inserts a newline before the table, then the table element,
+	// its first row, and the first cell — so the first cell's editable content
+	// begins at cursor + 4. (Verified against the live Docs API: a 2x2 table
+	// inserted at index 1 has cell content at indices 5, 7, 10, 12.)
+	// Within the table, each cell occupies 2 index units (cell start + content)
+	// and each row adds 1 unit of overhead for the row boundary, so:
+	//   cell (r, c) content index = tableBodyStart + r*(numCols*2+1) + c*2
 	//
 	// Cells are inserted in REVERSE order (last cell first) because the
 	// Google Docs batchUpdate API processes requests sequentially — inserting
 	// text into an earlier cell shifts all subsequent indices. By going in
 	// reverse, each insertion only affects higher indices that have already
 	// been populated.
-	tableBodyStart := b.cursor + 2
+	tableBodyStart := b.cursor + 4
 
 	var totalCellText int64
 	for r := numRows - 1; r >= 0; r-- {
@@ -629,6 +631,9 @@ func (b *requestBuilder) handleTable(table ast.Node, source []byte) {
 			if c < len(data[r]) {
 				text = data[r][c]
 			}
+			// Cell text must pass through the same sanitizer as body text and be
+			// measured in UTF-16 code units, matching the Docs API index model.
+			text = sanitizeForDocs(text)
 			if text != "" {
 				b.requests = append(b.requests, &docs.Request{
 					InsertText: &docs.InsertTextRequest{
@@ -636,7 +641,7 @@ func (b *requestBuilder) handleTable(table ast.Node, source []byte) {
 						Text:     text,
 					},
 				})
-				totalCellText += int64(len(text))
+				totalCellText += int64(utf16CodeUnits(text))
 			}
 		}
 	}
