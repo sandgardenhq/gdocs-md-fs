@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  goreleaser:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # create the GitHub Release
+      id-token: write        # build provenance attestation
+      attestations: write    # build provenance attestation
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0     # full history for the changelog
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          # brews publisher is deprecated in favor of homebrew_casks but required here: casks are macOS-only and we must support Linux (libfuse). Revisit before any GoReleaser v3 upgrade.
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/*.tar.gz
+
+  smoke-test-formula:
+    name: Smoke-test published formula
+    needs: goreleaser
+    runs-on: macos-latest
+    steps:
+      - name: Install from tap
+        run: brew install sandgardenhq/tap/gdocs-md-fs
+
+      - name: Verify gdocs-md-fs
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          gdocs-md-fs version
+          gdocs-md-fs version | grep -F "${VERSION}"
