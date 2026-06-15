@@ -10,7 +10,7 @@ import (
 func TestBuildWriteRequests_PrependsDeleteWhenDocHasContent(t *testing.T) {
 	md := []byte("# Hello\n")
 	// endIndex > 2 means the doc has existing content to clear.
-	reqs, err := buildWriteRequests(50, md)
+	reqs, err := buildWriteRequests(50, md, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestBuildWriteRequests_PrependsDeleteWhenDocHasContent(t *testing.T) {
 func TestBuildWriteRequests_SkipsDeleteForEmptyDoc(t *testing.T) {
 	md := []byte("# Hello\n")
 	// endIndex <= 2 means the doc body is empty (just the trailing newline).
-	reqs, err := buildWriteRequests(2, md)
+	reqs, err := buildWriteRequests(2, md, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestBuildWriteRequests_SkipsDeleteForEmptyDoc(t *testing.T) {
 }
 
 func TestBuildWriteRequests_NilMarkdownProducesDeleteOnly(t *testing.T) {
-	reqs, err := buildWriteRequests(50, nil)
+	reqs, err := buildWriteRequests(50, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestBuildWriteRequests_NilMarkdownProducesDeleteOnly(t *testing.T) {
 }
 
 func TestBuildWriteRequests_NilMarkdownEmptyDocProducesNoRequests(t *testing.T) {
-	reqs, err := buildWriteRequests(2, nil)
+	reqs, err := buildWriteRequests(2, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

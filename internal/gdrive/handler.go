@@ -114,7 +114,7 @@ func (h *DriveHandler) Write(ctx context.Context, filePath string, data []byte) 
 
 		endIndex := docBodyEndIndex(doc)
 
-		requests, err := buildWriteRequests(endIndex, data)
+		requests, err := buildWriteRequests(endIndex, data, h.wikiResolver(ctx))
 		if err != nil {
 			return err
 		}

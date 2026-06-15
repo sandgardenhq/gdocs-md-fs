@@ -17,9 +17,14 @@ func docToMarkdown(doc *docs.Document) ([]byte, error) {
 }
 
 // markdownToDocRequests converts markdown bytes into Google Docs API batch
-// update requests that can be applied to an existing document.
-func markdownToDocRequests(md []byte) ([]*docs.Request, error) {
-	reqs, err := converter.FromMarkdown(md)
+// update requests that can be applied to an existing document. If resolver is
+// non-nil, wikilinks are resolved to Doc URLs through it.
+func markdownToDocRequests(md []byte, resolver converter.WikiResolver) ([]*docs.Request, error) {
+	var opts []converter.Option
+	if resolver != nil {
+		opts = append(opts, converter.WithWikiResolver(resolver))
+	}
+	reqs, err := converter.FromMarkdown(md, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("gdrive: convert markdown to doc requests: %w", err)
 	}
@@ -41,7 +46,7 @@ func docBodyEndIndex(doc *docs.Document) int64 {
 // existing content (endIndex > 2), a DeleteContentRange request is prepended to
 // clear the body before inserting new content. endIndex is the Body's end index
 // as reported by the Docs API.
-func buildWriteRequests(endIndex int64, md []byte) ([]*docs.Request, error) {
+func buildWriteRequests(endIndex int64, md []byte, resolver converter.WikiResolver) ([]*docs.Request, error) {
 	var reqs []*docs.Request
 
 	// Delete existing body content if present. Index 1 is the start of
@@ -62,7 +67,7 @@ func buildWriteRequests(endIndex int64, md []byte) ([]*docs.Request, error) {
 		return reqs, nil
 	}
 
-	insertReqs, err := markdownToDocRequests(md)
+	insertReqs, err := markdownToDocRequests(md, resolver)
 	if err != nil {
 		return nil, err
 	}

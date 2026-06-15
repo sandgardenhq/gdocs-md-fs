@@ -39,6 +39,18 @@ The following formatting round-trips between Markdown and Google Docs:
 
 Monospace-font paragraphs in Google Docs (Courier New, Consolas, etc.) are detected and wrapped in fenced code blocks automatically.
 
+### Wikilinks
+
+Wikilinks let you link between Google Docs by name, Obsidian-style:
+
+- `[[Page Name]]` — links to a Google Doc named "Page Name".
+- `[[subfolder/Page Name]]` — a path-qualified target, resolved relative to the mount root.
+- `[[Page Name|Custom Text]]` — links to "Page Name" but displays "Custom Text".
+
+When you save, each wikilink target is resolved against the mounted folder tree (bare names are searched across the whole tree; paths resolve from the mount root). A match becomes a real Google Docs hyperlink. If no matching Doc exists, the link is still created but points at a placeholder and is colored red so you can spot it; once you create the target Doc and save again, the link resolves.
+
+Broken (placeholder) wikilinks read back as `[[Page Name]]`. Resolved wikilinks read back as ordinary Markdown links to the target Doc's URL.
+
 ### Caching
 
 gdocs-md-fs caches both metadata and file contents in memory to keep reads fast:

@@ -242,7 +242,12 @@ func renderTextRuns(elements []*docs.ParagraphElement, isHeading ...bool) string
 			formatted = "~~" + formatted + "~~"
 		}
 
-		if hasLink {
+		if hasLink && ts.Link.Url == brokenWikiLinkURL {
+			// A broken-wikilink sentinel link round-trips back to [[...]].
+			buf.WriteString("[[")
+			buf.WriteString(formatted)
+			buf.WriteString("]]")
+		} else if hasLink {
 			buf.WriteString("[")
 			buf.WriteString(formatted)
 			buf.WriteString("](")
