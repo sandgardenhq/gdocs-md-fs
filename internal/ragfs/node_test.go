@@ -171,6 +171,38 @@ func TestFileOpen_ReturnsDirectIO(t *testing.T) {
 	}
 }
 
+func TestFileSetxattr_ReturnsENOTSUP(t *testing.T) {
+	f := &File{}
+	errno := f.Setxattr(context.Background(), "com.apple.lastuseddate#PS", []byte("v"), 0)
+	if errno != syscall.ENOTSUP {
+		t.Errorf("Setxattr returned errno %d (%v), want ENOTSUP", errno, errno)
+	}
+}
+
+func TestFileRemovexattr_ReturnsENOTSUP(t *testing.T) {
+	f := &File{}
+	errno := f.Removexattr(context.Background(), "com.apple.lastuseddate#PS")
+	if errno != syscall.ENOTSUP {
+		t.Errorf("Removexattr returned errno %d (%v), want ENOTSUP", errno, errno)
+	}
+}
+
+func TestDirSetxattr_ReturnsENOTSUP(t *testing.T) {
+	d := &Dir{}
+	errno := d.Setxattr(context.Background(), "com.apple.lastuseddate#PS", []byte("v"), 0)
+	if errno != syscall.ENOTSUP {
+		t.Errorf("Setxattr returned errno %d (%v), want ENOTSUP", errno, errno)
+	}
+}
+
+func TestDirRemovexattr_ReturnsENOTSUP(t *testing.T) {
+	d := &Dir{}
+	errno := d.Removexattr(context.Background(), "com.apple.lastuseddate#PS")
+	if errno != syscall.ENOTSUP {
+		t.Errorf("Removexattr returned errno %d (%v), want ENOTSUP", errno, errno)
+	}
+}
+
 func TestFileRead_UpdatesEntrySizeFromContent(t *testing.T) {
 	content := []byte("# Hello World\n\nSome content here.\n")
 	h := &stubHandler{readContent: content}

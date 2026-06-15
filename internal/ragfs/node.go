@@ -39,7 +39,21 @@ var (
 	_ fs.NodeRenamer   = (*Dir)(nil)
 	_ fs.NodeMkdirer   = (*Dir)(nil)
 	_ fs.NodeStatfser  = (*Dir)(nil)
+	_ fs.NodeSetxattrer    = (*Dir)(nil)
+	_ fs.NodeRemovexattrer = (*Dir)(nil)
 )
+
+// Setxattr reports that the filesystem does not support extended attributes.
+// See File.Setxattr for the rationale; directories are targeted by recursive
+// copies (cp -R, rsync) the same way.
+func (d *Dir) Setxattr(_ context.Context, _ string, _ []byte, _ uint32) syscall.Errno {
+	return syscall.ENOTSUP
+}
+
+// Removexattr reports that the filesystem does not support extended attributes.
+func (d *Dir) Removexattr(_ context.Context, _ string) syscall.Errno {
+	return syscall.ENOTSUP
+}
 
 // Readdir returns all entries in this directory. Results are cached.
 func (d *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -366,7 +380,23 @@ var (
 	_ fs.NodeReader    = (*File)(nil)
 	_ fs.NodeWriter    = (*File)(nil)
 	_ fs.NodeFlusher   = (*File)(nil)
+	_ fs.NodeSetxattrer    = (*File)(nil)
+	_ fs.NodeRemovexattrer = (*File)(nil)
 )
+
+// Setxattr reports that the filesystem does not support extended attributes.
+// macOS cp/copyfile copies xattrs from the source onto the destination via
+// setxattr; returning ENOTSUP makes copyfile skip them silently, whereas the
+// go-fuse default (ENOATTR) is surfaced as "Attribute not found" and aborts
+// the copy.
+func (f *File) Setxattr(_ context.Context, _ string, _ []byte, _ uint32) syscall.Errno {
+	return syscall.ENOTSUP
+}
+
+// Removexattr reports that the filesystem does not support extended attributes.
+func (f *File) Removexattr(_ context.Context, _ string) syscall.Errno {
+	return syscall.ENOTSUP
+}
 
 // Getattr returns file attributes.
 func (f *File) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
