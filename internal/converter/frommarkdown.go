@@ -9,6 +9,7 @@ import (
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	extast "github.com/yuin/goldmark/extension/ast"
+	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	docs "google.golang.org/api/docs/v1"
 )
@@ -19,8 +20,16 @@ import (
 //
 // The caller is responsible for clearing existing document content before
 // applying these requests (see gdrive.buildWriteRequests).
-func FromMarkdown(md []byte) ([]*docs.Request, error) {
-	gm := goldmark.New(goldmark.WithExtensions(extension.GFM))
+func FromMarkdown(md []byte, opts ...Option) ([]*docs.Request, error) {
+	cfg := &config{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	gm := goldmark.New(
+		goldmark.WithExtensions(extension.GFM),
+		goldmark.WithParserOptions(parser.WithInlineParsers(wikiLinkInlineParser)),
+	)
 	reader := text.NewReader(md)
 	tree := gm.Parser().Parse(reader)
 
@@ -28,6 +37,7 @@ func FromMarkdown(md []byte) ([]*docs.Request, error) {
 		source:   md,
 		cursor:   1, // Google Docs body starts at index 1.
 		requests: nil,
+		resolver: cfg.resolver,
 	}
 
 	if err := b.walkNode(tree, md); err != nil {
@@ -74,6 +84,9 @@ type requestBuilder struct {
 	strikethrough bool
 	code          bool
 	linkURL       string // non-empty when inside a link node
+	linkBroken    bool   // true when linkURL is the broken-wikilink sentinel
+
+	resolver WikiResolver // resolves wikilink targets to Doc URLs; may be nil
 }
 
 // insertText creates an InsertText request at the current cursor position and
@@ -100,16 +113,25 @@ func (b *requestBuilder) insertText(s string) {
 
 	// Apply link if present.
 	if b.linkURL != "" {
+		ts := &docs.TextStyle{Link: &docs.Link{Url: b.linkURL}}
+		fields := "link"
+		if b.linkBroken {
+			// Mark broken wikilinks with a maroon foreground color.
+			ts.ForegroundColor = &docs.OptionalColor{
+				Color: &docs.Color{
+					RgbColor: &docs.RgbColor{Red: brokenLinkRed},
+				},
+			}
+			fields = "link,foregroundColor"
+		}
 		b.requests = append(b.requests, &docs.Request{
 			UpdateTextStyle: &docs.UpdateTextStyleRequest{
 				Range: &docs.Range{
 					StartIndex: startIdx,
 					EndIndex:   endIdx,
 				},
-				TextStyle: &docs.TextStyle{
-					Link: &docs.Link{Url: b.linkURL},
-				},
-				Fields: "link",
+				TextStyle: ts,
+				Fields:    fields,
 			},
 		})
 	}
@@ -256,6 +278,10 @@ func (b *requestBuilder) walkNode(node ast.Node, source []byte) error {
 
 	case *ast.Link:
 		return b.handleLink(n, source)
+
+	case *WikiLink:
+		b.handleWikiLink(n)
+		return nil
 
 	case *ast.Image:
 		b.handleImage(n, source)
