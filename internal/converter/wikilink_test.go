@@ -17,6 +17,42 @@ func resolvedFor(target, url string) WikiResolver {
 	}
 }
 
+func TestToMarkdown_Wikilink_SentinelBecomesWikilink(t *testing.T) {
+	doc := makeDoc(makeParagraph(StyleNormalText,
+		textRun("See "),
+		linkRun("New Page", brokenWikiLinkURL),
+		textRun(" now.\n"),
+	))
+
+	result, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+
+	expected := "See [[New Page]] now.\n"
+	if string(result) != expected {
+		t.Errorf("got %q, want %q", string(result), expected)
+	}
+}
+
+func TestToMarkdown_Wikilink_RealLinkStaysPlain(t *testing.T) {
+	url := "https://docs.google.com/document/d/abc/edit"
+	doc := makeDoc(makeParagraph(StyleNormalText,
+		linkRun("Existing Page", url),
+		textRun("\n"),
+	))
+
+	result, err := ToMarkdown(doc)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+
+	expected := "[Existing Page](" + url + ")\n"
+	if string(result) != expected {
+		t.Errorf("got %q, want %q", string(result), expected)
+	}
+}
+
 // insertedTexts returns all InsertText payloads from the requests.
 func insertedTexts(reqs []*docs.Request) []string {
 	var out []string
