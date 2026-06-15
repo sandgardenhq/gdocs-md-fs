@@ -1,4 +1,4 @@
-module github.com/brittcrawford/gdocs-md-fs
+module github.com/sandgardenhq/md-to-gdocs
 
 go 1.25.0
 

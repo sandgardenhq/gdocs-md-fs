@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/brittcrawford/gdocs-md-fs/internal/gdrive"
-	"github.com/brittcrawford/gdocs-md-fs/internal/ragfs"
+	"github.com/sandgardenhq/md-to-gdocs/internal/gdrive"
+	"github.com/sandgardenhq/md-to-gdocs/internal/ragfs"
 	"github.com/spf13/cobra"
 )
 

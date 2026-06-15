@@ -63,12 +63,35 @@ Writes are buffered in memory and persisted to Google Drive when the file descri
 
 ## Installation
 
+### Homebrew (recommended)
+
+```bash
+brew install sandgardenhq/tap/gdocs-md-fs
+```
+
+On **macOS**, gdocs-md-fs also needs macFUSE, which Homebrew cannot install
+automatically (it is a system extension requiring manual approval and a reboot):
+
+```bash
+brew install --cask macfuse
+```
+
+Then approve the macFUSE system extension under **System Settings > Privacy &
+Security** and reboot. On **Linux**, the required `libfuse` is installed
+automatically as a formula dependency.
+
+### go install
+
+```bash
+go install github.com/sandgardenhq/md-to-gdocs/cmd/gdocs-md-fs@latest
+```
+
 ### From source
 
 ```bash
 # Clone and build
-git clone <repo-url>
-cd gdocs-md-fs
+git clone https://github.com/sandgardenhq/md-to-gdocs.git
+cd md-to-gdocs
 
 # Build (outputs to bin/gdocs-md-fs)
 ./scripts/build.sh

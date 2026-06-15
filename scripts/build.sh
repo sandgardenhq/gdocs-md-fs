@@ -32,7 +32,7 @@ OUTPUT="bin/gdocs-md-fs"
 # ---------------------------------------------------------------------------
 # Linker flags — embed version info and strip debug symbols
 # ---------------------------------------------------------------------------
-MODULE="github.com/brittcrawford/gdocs-md-fs/internal/cli"
+MODULE="github.com/sandgardenhq/md-to-gdocs/internal/cli"
 LDFLAGS="-s -w"
 LDFLAGS="${LDFLAGS} -X ${MODULE}.Version=${VERSION}"
 LDFLAGS="${LDFLAGS} -X ${MODULE}.Commit=${COMMIT}"
