@@ -7,6 +7,15 @@ import (
 	docs "google.golang.org/api/docs/v1"
 )
 
+func TestWikiLinkNode_KindAndDump(t *testing.T) {
+	n := &WikiLink{Target: "Page", Alias: "Alias"}
+	if n.Kind() != KindWikiLink {
+		t.Errorf("Kind() = %v, want %v", n.Kind(), KindWikiLink)
+	}
+	// Dump writes to stdout; just ensure it does not panic.
+	n.Dump([]byte("source"), 0)
+}
+
 // resolvedFor builds a WikiResolver that returns url for the given target.
 func resolvedFor(target, url string) WikiResolver {
 	return func(t string) (string, bool) {
