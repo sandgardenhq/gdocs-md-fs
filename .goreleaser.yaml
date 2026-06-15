@@ -52,7 +52,7 @@ brews:
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
-    homepage: https://github.com/sandgardenhq/md-to-gdocs
+    homepage: https://github.com/sandgardenhq/gdocs-md-fs
     description: Mount Google Drive as a local FUSE filesystem with Google Docs as Markdown.
     license: MIT
     install: |
