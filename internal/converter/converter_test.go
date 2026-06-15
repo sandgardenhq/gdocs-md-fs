@@ -2014,6 +2014,75 @@ func TestFromMarkdown_TableCursorAdvancesCorrectly(t *testing.T) {
 	}
 }
 
+func TestFromMarkdown_TableCellAbsoluteIndices(t *testing.T) {
+	// Verified against the live Google Docs API: a 2x2 table inserted at index 1
+	// places cell content at A1=5, B1=7, A2=10, B2=12. The first cell begins at
+	// the insert index + 4 (leading newline + table + row + cell), the column
+	// stride is 2, and the row stride is 2*cols+1 = 5.
+	md := []byte("| A | B |\n| --- | --- |\n| 1 | 2 |\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := map[string]int64{}
+	for _, req := range requests {
+		if req.InsertText != nil {
+			got[req.InsertText.Text] = req.InsertText.Location.Index
+		}
+	}
+
+	want := map[string]int64{"A": 5, "B": 7, "1": 10, "2": 12}
+	for text, idx := range want {
+		if got[text] != idx {
+			t.Errorf("cell %q inserted at index %d, want %d", text, got[text], idx)
+		}
+	}
+}
+
+func TestFromMarkdown_TableCellUTF16CursorAdvance(t *testing.T) {
+	// Cell text containing characters outside the BMP basis must advance the
+	// cursor by UTF-16 code units, not raw bytes. The em dash (U+2014) is 3
+	// bytes but a single UTF-16 code unit. Four single-rune cells must therefore
+	// advance the cursor by 4, putting "AfterX" at 1 + 13 (structure) + 4 = 18.
+	md := []byte("| — | — |\n| --- | --- |\n| — | — |\n\nAfterX\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var afterTableIdx int64 = -1
+	for _, req := range requests {
+		if req.InsertText != nil && strings.Contains(req.InsertText.Text, "AfterX") {
+			afterTableIdx = req.InsertText.Location.Index
+			break
+		}
+	}
+	if afterTableIdx == -1 {
+		t.Fatal("missing InsertText for 'AfterX'")
+	}
+	if afterTableIdx != 18 {
+		t.Errorf("'AfterX' index = %d, want 18 (cell text measured in UTF-16 units, not bytes)", afterTableIdx)
+	}
+}
+
+func TestFromMarkdown_TableCellSanitized(t *testing.T) {
+	// Cell text must pass through the same sanitizer as body text so the Docs
+	// API does not reject control characters. A BEL (U+0007) inside a cell must
+	// be stripped.
+	md := []byte("| a\x07b | c |\n| --- | --- |\n| d | e |\n")
+	requests, err := FromMarkdown(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, req := range requests {
+		if req.InsertText != nil && strings.ContainsRune(req.InsertText.Text, '\x07') {
+			t.Errorf("cell text contains unsanitized control char: %q", req.InsertText.Text)
+		}
+	}
+}
+
 func TestFromMarkdown_FormattingRequestOrder(t *testing.T) {
 	tests := []struct {
 		name       string
