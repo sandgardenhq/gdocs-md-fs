@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/brittcrawford/gdocs-md-fs/internal/ragfs"
+	"github.com/sandgardenhq/md-to-gdocs/internal/ragfs"
 	"google.golang.org/api/drive/v3"
 )
 
