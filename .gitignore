@@ -37,3 +37,6 @@ bin/*
 
 .sgai/**/*
 .sgai
+
+# GoReleaser build output
+dist/
