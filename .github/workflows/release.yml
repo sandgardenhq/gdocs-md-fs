@@ -56,4 +56,6 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           gdocs-md-fs version
-          gdocs-md-fs version | grep -F "${VERSION}"
+          # GoReleaser's .Version strips the leading "v", so the binary prints
+          # "0.1.0" for tag "v0.1.0". Strip the prefix before matching.
+          gdocs-md-fs version | grep -F "${VERSION#v}"
