@@ -62,6 +62,42 @@ func TestWikiResolver_BareNameViaTreeWalk(t *testing.T) {
 	}
 }
 
+func TestWikiResolver_MemoizesTreeWalk(t *testing.T) {
+	h := &DriveHandler{
+		rootID:    "root",
+		pathCache: make(map[string]*pathEntry),
+	}
+	var listCalls int
+	counting := func(_ context.Context, folderID string) ([]*drive.File, error) {
+		listCalls++
+		if folderID == "root" {
+			return []*drive.File{{Id: "doc-bare", Name: "Page", MimeType: MimeDoc}}, nil
+		}
+		return nil, nil
+	}
+
+	resolve := h.wikiResolverWith(context.Background(), counting)
+
+	// Repeated resolutions of the same hit walk the tree only once.
+	if url, ok := resolve("Page"); !ok || url != "https://docs.google.com/document/d/doc-bare/edit" {
+		t.Fatalf("resolve = (%q, %v), want resolved doc-bare URL", url, ok)
+	}
+	resolve("Page")
+	if listCalls != 1 {
+		t.Errorf("hit walked %d times, want 1 (memoized)", listCalls)
+	}
+
+	// Misses are memoized too: the second lookup does not re-walk.
+	before := listCalls
+	if _, ok := resolve("Missing"); ok {
+		t.Fatal("unknown target should not resolve")
+	}
+	resolve("Missing")
+	if listCalls != before+1 {
+		t.Errorf("miss walked %d times, want 1 (memoized)", listCalls-before)
+	}
+}
+
 func TestWikiResolver_PathTargetFromCache(t *testing.T) {
 	h := &DriveHandler{
 		rootID:    "root",

@@ -58,19 +58,30 @@ func (h *DriveHandler) wikiResolver(ctx context.Context) converter.WikiResolver 
 // wikiResolverWith is wikiResolver with an injectable folder lister, enabling
 // tree-walk resolution to be tested without a live Drive connection.
 func (h *DriveHandler) wikiResolverWith(ctx context.Context, list folderLister) converter.WikiResolver {
+	// memo caches resolution results (hits and misses) for the lifetime of this
+	// resolver, so a single Write with repeated or many wikilinks does not
+	// re-walk the tree per link. The closure is single-goroutine, so no locking.
+	type result struct {
+		url string
+		ok  bool
+	}
+	memo := make(map[string]result)
+
 	return func(target string) (string, bool) {
-		if strings.Contains(target, "/") {
-			pe, err := h.resolvePathEntry(ctx, "/"+target+".md")
-			if err != nil || pe.mimeType != MimeDoc {
-				return "", false
-			}
-			return docURL(pe.fileID), true
+		if r, cached := memo[target]; cached {
+			return r.url, r.ok
 		}
 
-		id, ok := findDocByName(ctx, list, h.rootID, target)
-		if !ok {
-			return "", false
+		r := result{}
+		if strings.Contains(target, "/") {
+			if pe, err := h.resolvePathEntry(ctx, "/"+target+".md"); err == nil && pe.mimeType == MimeDoc {
+				r = result{url: docURL(pe.fileID), ok: true}
+			}
+		} else if id, ok := findDocByName(ctx, list, h.rootID, target); ok {
+			r = result{url: docURL(id), ok: true}
 		}
-		return docURL(id), true
+
+		memo[target] = r
+		return r.url, r.ok
 	}
 }
