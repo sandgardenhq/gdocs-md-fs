@@ -1976,3 +1976,203 @@ func TestDirLookup_StatNotExist_ReturnsENOENT(t *testing.T) {
 		t.Fatalf("Lookup returned errno %d (%v), want ENOENT", errno, errno)
 	}
 }
+
+func TestDirCreate_OEXCL_Existing_ReturnsEEXIST(t *testing.T) {
+	// open(O_CREAT|O_EXCL) on an existing name must fail; Drive allows
+	// duplicate names, so handler.Create would silently make a second doc.
+	h := &stubHandler{}
+	cache := NewCache()
+	cache.PutMetaList("parent", []Entry{{Name: "doc.md", MimeType: mimeGoogleDoc}})
+	d := &Dir{handler: h, cache: cache, path: "parent"}
+
+	var out fuse.EntryOut
+	_, _, _, errno := d.Create(context.Background(), "doc.md",
+		uint32(syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY), 0o644, &out)
+	if errno != syscall.EEXIST {
+		t.Fatalf("Create returned errno %d (%v), want EEXIST", errno, errno)
+	}
+	if h.createCalled {
+		t.Error("handler.Create must not be called when the name exists")
+	}
+}
+
+func TestDirCreate_OEXCL_StatNotExist_Proceeds(t *testing.T) {
+	// No cached listing: existence is checked via handler.Stat. A
+	// missing file lets creation proceed (verified by handler.Create
+	// being reached; inode creation needs a mounted bridge, so an error
+	// return from Create is used to stop before NewInode).
+	h := &stubHandler{
+		statFn: func(p string) (*Entry, error) {
+			return nil, fmt.Errorf("stat %q: %w", p, iofs.ErrNotExist)
+		},
+		createErr: fmt.Errorf("stop before NewInode"),
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	var out fuse.EntryOut
+	_, _, _, errno := d.Create(context.Background(), "doc.md",
+		uint32(syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY), 0o644, &out)
+	if errno != syscall.EIO {
+		t.Fatalf("Create returned errno %d, want EIO from createErr sentinel", errno)
+	}
+	if !h.createCalled {
+		t.Error("handler.Create should be reached when the name does not exist")
+	}
+}
+
+func TestDirCreate_OEXCL_TempExists_ReturnsEEXIST(t *testing.T) {
+	d := &Dir{
+		handler:   &stubHandler{},
+		cache:     NewCache(),
+		path:      "parent",
+		tempFiles: map[string]*TempFile{".doc.md.tmp": newTempFile(".doc.md.tmp", 501, 20)},
+	}
+
+	var out fuse.EntryOut
+	_, _, _, errno := d.Create(context.Background(), ".doc.md.tmp",
+		uint32(syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY), 0o644, &out)
+	if errno != syscall.EEXIST {
+		t.Fatalf("Create returned errno %d (%v), want EEXIST", errno, errno)
+	}
+}
+
+func TestDirRename_NoReplace_DestExists_ReturnsEEXIST(t *testing.T) {
+	// RENAME_NOREPLACE (Linux, 0x1) and RENAME_EXCL (macOS, 0x4) promise
+	// EEXIST when the destination exists.
+	renameCalled := false
+	h := &stubHandler{
+		renameFn: func(_, _ string) error { renameCalled = true; return nil },
+	}
+	cache := NewCache()
+	cache.PutMetaList("parent", []Entry{
+		{Name: "src.md", MimeType: mimeGoogleDoc},
+		{Name: "dst.md", MimeType: mimeGoogleDoc},
+	})
+	d := &Dir{handler: h, cache: cache, path: "parent"}
+
+	for _, flag := range []uint32{0x1, 0x4} {
+		errno := d.Rename(context.Background(), "src.md", d, "dst.md", flag)
+		if errno != syscall.EEXIST {
+			t.Errorf("Rename flags=%#x returned errno %d (%v), want EEXIST", flag, errno, errno)
+		}
+	}
+	if renameCalled {
+		t.Error("handler.Rename must not be called when NOREPLACE dest exists")
+	}
+}
+
+func TestDirRename_DestExists_ReplacedNotDuplicated(t *testing.T) {
+	// POSIX rename atomically replaces an existing destination. Drive
+	// permits duplicate names, so the old destination must be deleted
+	// before the rename or both files survive under the same name.
+	var calls []string
+	h := &stubHandler{
+		deleteFn: func(p string) error { calls = append(calls, "delete:"+p); return nil },
+		renameFn: func(o, n string) error { calls = append(calls, "rename:"+o+"->"+n); return nil },
+	}
+	cache := NewCache()
+	cache.PutMetaList("parent", []Entry{
+		{Name: "src.md", MimeType: mimeGoogleDoc},
+		{Name: "dst.md", MimeType: mimeGoogleDoc},
+	})
+	d := &Dir{handler: h, cache: cache, path: "parent"}
+
+	errno := d.Rename(context.Background(), "src.md", d, "dst.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d, want 0", errno)
+	}
+	want := []string{"delete:parent/dst.md", "rename:parent/src.md->parent/dst.md"}
+	if len(calls) != 2 || calls[0] != want[0] || calls[1] != want[1] {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestDirRename_DestAbsent_NoDelete(t *testing.T) {
+	deleteCalled := false
+	h := &stubHandler{
+		deleteFn: func(string) error { deleteCalled = true; return nil },
+		renameFn: func(_, _ string) error { return nil },
+		statFn: func(p string) (*Entry, error) {
+			return nil, fmt.Errorf("stat %q: %w", p, iofs.ErrNotExist)
+		},
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	errno := d.Rename(context.Background(), "src.md", d, "dst.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d, want 0", errno)
+	}
+	if deleteCalled {
+		t.Error("handler.Delete must not be called when the destination is absent")
+	}
+}
+
+func TestDirRename_TempPromote_DestExists_WritesExistingDoc(t *testing.T) {
+	// Editor atomic save (write .tmp, rename over doc.md) targets a doc
+	// that already exists; creating a new one would duplicate it in Drive.
+	h := &stubHandler{}
+	cache := NewCache()
+	cache.PutMetaList("parent", []Entry{{Name: "doc.md", MimeType: mimeGoogleDoc}})
+	d := &Dir{
+		handler:   h,
+		cache:     cache,
+		path:      "parent",
+		tempFiles: map[string]*TempFile{".doc.md.tmp": newTempFile(".doc.md.tmp", 501, 20)},
+	}
+	d.tempFiles[".doc.md.tmp"].data = []byte("# Saved\n")
+
+	errno := d.Rename(context.Background(), ".doc.md.tmp", d, "doc.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d, want 0", errno)
+	}
+	if h.createCalled {
+		t.Error("promote over an existing doc must not create a duplicate")
+	}
+	if !h.writeCalled {
+		t.Error("promote must write the temp content into the existing doc")
+	}
+	if string(h.lastWritten) != "# Saved\n" {
+		t.Errorf("wrote %q, want %q", h.lastWritten, "# Saved\n")
+	}
+}
+
+func TestDirRename_TempPromote_NoReplace_ReturnsEEXIST(t *testing.T) {
+	h := &stubHandler{}
+	cache := NewCache()
+	cache.PutMetaList("parent", []Entry{{Name: "doc.md", MimeType: mimeGoogleDoc}})
+	d := &Dir{
+		handler:   h,
+		cache:     cache,
+		path:      "parent",
+		tempFiles: map[string]*TempFile{".doc.md.tmp": newTempFile(".doc.md.tmp", 501, 20)},
+	}
+
+	errno := d.Rename(context.Background(), ".doc.md.tmp", d, "doc.md", 0x1)
+	if errno != syscall.EEXIST {
+		t.Fatalf("Rename returned errno %d (%v), want EEXIST", errno, errno)
+	}
+	// The temp file must survive the failed rename.
+	d.tempMu.RLock()
+	_, ok := d.tempFiles[".doc.md.tmp"]
+	d.tempMu.RUnlock()
+	if !ok {
+		t.Error("temp file must be preserved when NOREPLACE rename fails")
+	}
+}
+
+func TestDirRename_TempToTemp_NoReplace_DestExists_ReturnsEEXIST(t *testing.T) {
+	d := &Dir{
+		handler: &stubHandler{},
+		cache:   NewCache(),
+		path:    "parent",
+		tempFiles: map[string]*TempFile{
+			".a.swp": newTempFile(".a.swp", 501, 20),
+			".b.swp": newTempFile(".b.swp", 501, 20),
+		},
+	}
+
+	errno := d.Rename(context.Background(), ".a.swp", d, ".b.swp", 0x1)
+	if errno != syscall.EEXIST {
+		t.Fatalf("Rename returned errno %d (%v), want EEXIST", errno, errno)
+	}
+}

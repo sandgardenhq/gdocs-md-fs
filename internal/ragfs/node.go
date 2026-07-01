@@ -137,11 +137,48 @@ func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 	return d.childInode(ctx, entry, childPath, out), fs.OK
 }
 
+// rename(2) flags requesting that an existing destination must not be
+// replaced. go-fuse passes kernel flags through verbatim, so both the Linux
+// and macOS encodings need to be recognized.
+const (
+	renameFlagNoReplace = 0x1 // Linux RENAME_NOREPLACE
+	renameFlagExcl      = 0x4 // Darwin RENAME_EXCL (renamex_np)
+)
+
+// childExists reports whether a backend entry with the given name exists in
+// this directory, consulting the cached listing before falling back to Stat.
+// A non-zero errno means existence could not be determined.
+func (d *Dir) childExists(ctx context.Context, name string) (bool, syscall.Errno) {
+	if cached := d.cache.GetMetaList(d.path); cached != nil {
+		for i := range cached {
+			if cached[i].Name == name {
+				return true, 0
+			}
+		}
+		return false, 0
+	}
+
+	_, err := d.handler.Stat(ctx, path.Join(d.path, name))
+	if err == nil {
+		return true, 0
+	}
+	if errors.Is(err, iofs.ErrNotExist) {
+		return false, 0
+	}
+	return false, syscall.EIO
+}
+
 // Create creates a new file in this directory.
 func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	if isTempFile(name) {
 		tf := newTempFile(name, d.uid, d.gid)
 		d.tempMu.Lock()
+		if flags&syscall.O_EXCL != 0 {
+			if _, exists := d.tempFiles[name]; exists {
+				d.tempMu.Unlock()
+				return nil, nil, 0, syscall.EEXIST
+			}
+		}
 		if d.tempFiles == nil {
 			d.tempFiles = make(map[string]*TempFile)
 		}
@@ -158,6 +195,18 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 	}
 
 	childPath := path.Join(d.path, name)
+
+	// O_EXCL demands EEXIST for an existing name. Drive allows duplicate
+	// names, so handler.Create would otherwise silently make a second doc.
+	if flags&syscall.O_EXCL != 0 {
+		exists, eerrno := d.childExists(ctx, name)
+		if eerrno != 0 {
+			return nil, nil, 0, eerrno
+		}
+		if exists {
+			return nil, nil, 0, syscall.EEXIST
+		}
+	}
 
 	entry, err := d.handler.Create(ctx, childPath, false)
 	if err != nil {
@@ -239,6 +288,8 @@ func (d *Dir) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 // Rename moves or renames an entry from this directory to another.
 func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	noReplace := flags&(renameFlagNoReplace|renameFlagExcl) != 0
+
 	// Renaming temp files stays in-memory, unless the destination is a
 	// non-temp name (e.g., editor atomic save: write .tmp → rename to .md).
 	d.tempMu.RLock()
@@ -250,15 +301,30 @@ func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 			return syscall.EIO
 		}
 		if !isTempFile(newName) {
-			// Promote: create the file in the backend, then write content.
+			// Promote: write the temp content into the backend. The
+			// destination usually already exists (editor atomic save
+			// targets the doc being edited); creating it again would
+			// duplicate the doc in Drive.
+			destExists, eerrno := newDir.childExists(ctx, newName)
+			if noReplace {
+				if eerrno != 0 {
+					return eerrno
+				}
+				if destExists {
+					return syscall.EEXIST
+				}
+			}
+
 			tf.mu.Lock()
 			data := make([]byte, len(tf.data))
 			copy(data, tf.data)
 			tf.mu.Unlock()
 
 			newPath := path.Join(newDir.path, newName)
-			if _, err := d.handler.Create(ctx, newPath, false); err != nil {
-				return syscall.EIO
+			if !destExists {
+				if _, err := d.handler.Create(ctx, newPath, false); err != nil {
+					return syscall.EIO
+				}
 			}
 			if err := d.handler.Write(ctx, newPath, data); err != nil {
 				return syscall.EIO
@@ -276,6 +342,14 @@ func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 			return fs.OK
 		}
 		// Temp-to-temp rename stays in-memory.
+		if noReplace {
+			newDir.tempMu.RLock()
+			_, destExists := newDir.tempFiles[newName]
+			newDir.tempMu.RUnlock()
+			if destExists {
+				return syscall.EEXIST
+			}
+		}
 		if d == newDir {
 			// Same directory: single lock to avoid a window where the
 			// file is absent from the map.
@@ -306,6 +380,26 @@ func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 		return syscall.EIO
 	}
 	newPath := path.Join(newDirNode.path, newName)
+
+	if oldPath != newPath {
+		destExists, eerrno := newDirNode.childExists(ctx, newName)
+		if noReplace {
+			if eerrno != 0 {
+				return eerrno
+			}
+			if destExists {
+				return syscall.EEXIST
+			}
+		}
+		// POSIX rename replaces an existing destination. Drive permits
+		// duplicate names, so the old destination must be removed first
+		// or both files survive under the same name.
+		if destExists {
+			if err := d.handler.Delete(ctx, newPath); err != nil {
+				return syscall.EIO
+			}
+		}
+	}
 
 	if err := d.handler.Rename(ctx, oldPath, newPath); err != nil {
 		return syscall.EIO
