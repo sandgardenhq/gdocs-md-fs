@@ -60,6 +60,9 @@ var (
 	_ fs.NodeFlusher       = (*TempFile)(nil)
 	_ fs.NodeFsyncer       = (*TempFile)(nil)
 	_ fs.NodeStatfser      = (*TempFile)(nil)
+	_ fs.NodeGetlker       = (*TempFile)(nil)
+	_ fs.NodeSetlker       = (*TempFile)(nil)
+	_ fs.NodeSetlkwer      = (*TempFile)(nil)
 	_ fs.NodeSetxattrer    = (*TempFile)(nil)
 	_ fs.NodeRemovexattrer = (*TempFile)(nil)
 )
@@ -67,6 +70,23 @@ var (
 // Statfs returns the same filesystem statistics as directories; see fillStatfs.
 func (tf *TempFile) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
 	fillStatfs(out)
+	return fs.OK
+}
+
+// Getlk reports that no lock conflicts with the request; locks are advisory
+// no-ops (see File.Getlk). Office suites lock their temp companion files.
+func (tf *TempFile) Getlk(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32, out *fuse.FileLock) syscall.Errno {
+	out.Typ = syscall.F_UNLCK
+	return fs.OK
+}
+
+// Setlk acquires a lock as an advisory no-op; see File.Getlk.
+func (tf *TempFile) Setlk(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32) syscall.Errno {
+	return fs.OK
+}
+
+// Setlkw acquires a lock, waiting if needed, as an advisory no-op; see File.Getlk.
+func (tf *TempFile) Setlkw(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32) syscall.Errno {
 	return fs.OK
 }
 

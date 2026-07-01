@@ -307,3 +307,22 @@ func TestTempFileStatfs_MatchesDirStatfs(t *testing.T) {
 		t.Errorf("TempFile Statfs = %+v, want same as Dir Statfs %+v", fromTemp, fromDir)
 	}
 }
+
+func TestTempFileLocks_ReturnOK(t *testing.T) {
+	// Office suites lock their temp/lock companion files on open.
+	tf := newTempFile("~$document.docx", 501, 20)
+	lk := &fuse.FileLock{Typ: syscall.F_WRLCK}
+	var out fuse.FileLock
+	if errno := tf.Getlk(context.Background(), nil, 1, lk, 0, &out); errno != 0 {
+		t.Errorf("Getlk returned errno %d, want 0", errno)
+	}
+	if out.Typ != syscall.F_UNLCK {
+		t.Errorf("out.Typ = %d, want F_UNLCK (%d)", out.Typ, syscall.F_UNLCK)
+	}
+	if errno := tf.Setlk(context.Background(), nil, 1, lk, 0); errno != 0 {
+		t.Errorf("Setlk returned errno %d, want 0", errno)
+	}
+	if errno := tf.Setlkw(context.Background(), nil, 1, lk, 0); errno != 0 {
+		t.Errorf("Setlkw returned errno %d, want 0", errno)
+	}
+}

@@ -1710,3 +1710,31 @@ func TestFileStatfs_MatchesDirStatfs(t *testing.T) {
 		t.Error("Statfs must report free space, got Bavail=0")
 	}
 }
+
+func TestFileGetlk_ReportsUnlocked(t *testing.T) {
+	// A single-user FUSE mount has no competing lockers; report that the
+	// requested region is unlocked so fcntl(F_GETLK) probes succeed.
+	f := &File{}
+	lk := &fuse.FileLock{Typ: syscall.F_WRLCK, Start: 0, End: 100}
+	var out fuse.FileLock
+	errno := f.Getlk(context.Background(), nil, 1, lk, 0, &out)
+	if errno != 0 {
+		t.Fatalf("Getlk returned errno %d, want 0", errno)
+	}
+	if out.Typ != syscall.F_UNLCK {
+		t.Errorf("out.Typ = %d, want F_UNLCK (%d)", out.Typ, syscall.F_UNLCK)
+	}
+}
+
+func TestFileSetlk_ReturnsOK(t *testing.T) {
+	// flock/fcntl locks always succeed: apps like LibreOffice and sqlite
+	// refuse to open files on filesystems where locking returns ENOTSUP.
+	f := &File{}
+	lk := &fuse.FileLock{Typ: syscall.F_WRLCK}
+	if errno := f.Setlk(context.Background(), nil, 1, lk, 0); errno != 0 {
+		t.Errorf("Setlk returned errno %d, want 0", errno)
+	}
+	if errno := f.Setlkw(context.Background(), nil, 1, lk, 0); errno != 0 {
+		t.Errorf("Setlkw returned errno %d, want 0", errno)
+	}
+}

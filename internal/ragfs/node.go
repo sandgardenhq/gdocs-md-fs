@@ -408,6 +408,9 @@ var (
 	_ fs.NodeFlusher       = (*File)(nil)
 	_ fs.NodeFsyncer       = (*File)(nil)
 	_ fs.NodeStatfser      = (*File)(nil)
+	_ fs.NodeGetlker       = (*File)(nil)
+	_ fs.NodeSetlker       = (*File)(nil)
+	_ fs.NodeSetlkwer      = (*File)(nil)
 	_ fs.NodeSetxattrer    = (*File)(nil)
 	_ fs.NodeRemovexattrer = (*File)(nil)
 )
@@ -415,6 +418,25 @@ var (
 // Statfs returns the same filesystem statistics as directories; see fillStatfs.
 func (f *File) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
 	fillStatfs(out)
+	return fs.OK
+}
+
+// Getlk reports that no lock conflicts with the request. Locks are advisory
+// no-ops on this filesystem: a mount is single-user and Drive provides no
+// cross-client locking, but apps that probe locks (office suites, sqlite)
+// refuse to open files when lock calls return ENOTSUP.
+func (f *File) Getlk(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32, out *fuse.FileLock) syscall.Errno {
+	out.Typ = syscall.F_UNLCK
+	return fs.OK
+}
+
+// Setlk acquires a lock as an advisory no-op; see Getlk.
+func (f *File) Setlk(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32) syscall.Errno {
+	return fs.OK
+}
+
+// Setlkw acquires a lock, waiting if needed, as an advisory no-op; see Getlk.
+func (f *File) Setlkw(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32) syscall.Errno {
 	return fs.OK
 }
 
