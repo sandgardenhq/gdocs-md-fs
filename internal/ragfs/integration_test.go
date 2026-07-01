@@ -2,6 +2,7 @@ package ragfs
 
 import (
 	"fmt"
+	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -132,7 +133,9 @@ func (h *trackingHandler) Stat(_ context.Context, path string) (*Entry, error) {
 			ModTime:  time.Now(),
 		}, nil
 	}
-	return nil, fmt.Errorf("not found: %s", path)
+	// Wrap fs.ErrNotExist per the Handler contract so Lookup maps a
+	// missing path to ENOENT rather than EIO.
+	return nil, fmt.Errorf("not found: %s: %w", path, iofs.ErrNotExist)
 }
 
 // TestIntegration uses a single FUSE mount to run all integration subtests,
