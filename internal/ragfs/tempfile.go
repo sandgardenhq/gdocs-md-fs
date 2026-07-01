@@ -58,7 +58,21 @@ var (
 	_ fs.NodeReader    = (*TempFile)(nil)
 	_ fs.NodeWriter    = (*TempFile)(nil)
 	_ fs.NodeFlusher   = (*TempFile)(nil)
+	_ fs.NodeSetxattrer    = (*TempFile)(nil)
+	_ fs.NodeRemovexattrer = (*TempFile)(nil)
 )
+
+// Setxattr reports that the filesystem does not support extended attributes.
+// See File.Setxattr for the rationale; editors write temp files via the same
+// macOS copyfile path that aborts on the go-fuse default ENOATTR.
+func (tf *TempFile) Setxattr(_ context.Context, _ string, _ []byte, _ uint32) syscall.Errno {
+	return syscall.ENOTSUP
+}
+
+// Removexattr reports that the filesystem does not support extended attributes.
+func (tf *TempFile) Removexattr(_ context.Context, _ string) syscall.Errno {
+	return syscall.ENOTSUP
+}
 
 func newTempFile(name string, uid, gid uint32) *TempFile {
 	return &TempFile{

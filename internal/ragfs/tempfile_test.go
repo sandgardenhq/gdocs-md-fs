@@ -264,3 +264,22 @@ func TestTempFile_Setattr_NoSize(t *testing.T) {
 		t.Errorf("size: got %d, want 4", out.Size)
 	}
 }
+
+func TestTempFileSetxattr_ReturnsENOTSUP(t *testing.T) {
+	// macOS copyfile aborts a copy when setxattr returns ENOATTR (the
+	// go-fuse default); ENOTSUP makes it skip xattrs silently, matching
+	// the behavior of File and Dir.
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	errno := tf.Setxattr(context.Background(), "com.apple.lastuseddate#PS", []byte("v"), 0)
+	if errno != syscall.ENOTSUP {
+		t.Errorf("Setxattr returned errno %d (%v), want ENOTSUP", errno, errno)
+	}
+}
+
+func TestTempFileRemovexattr_ReturnsENOTSUP(t *testing.T) {
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	errno := tf.Removexattr(context.Background(), "com.apple.lastuseddate#PS")
+	if errno != syscall.ENOTSUP {
+		t.Errorf("Removexattr returned errno %d (%v), want ENOTSUP", errno, errno)
+	}
+}
