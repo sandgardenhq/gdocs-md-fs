@@ -3,6 +3,8 @@ package ragfs
 import (
 	"bytes"
 	"context"
+	"errors"
+	iofs "io/fs"
 	"log"
 	"path"
 	"sync"
@@ -119,10 +121,15 @@ func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 		}
 	}
 
-	// Fall back to Stat.
+	// Fall back to Stat. Only a genuine not-found maps to ENOENT; other
+	// failures (network, API) must surface as EIO, or an outage would
+	// tell callers files were deleted.
 	entry, err := d.handler.Stat(ctx, childPath)
 	if err != nil {
-		return nil, syscall.ENOENT
+		if errors.Is(err, iofs.ErrNotExist) {
+			return nil, syscall.ENOENT
+		}
+		return nil, syscall.EIO
 	}
 
 	d.cache.PutMeta(childPath, entry)

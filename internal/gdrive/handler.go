@@ -3,6 +3,7 @@ package gdrive
 import (
 	"context"
 	"fmt"
+	iofs "io/fs"
 	"os"
 	"path"
 	"strings"
@@ -353,7 +354,9 @@ func (h *DriveHandler) resolvePathEntry(ctx context.Context, fsPath string) (*pa
 		}
 
 		if !found {
-			return nil, fmt.Errorf("resolve %q: %q not found in %q", fsPath, part, currentPath)
+			// Wrap fs.ErrNotExist so ragfs can map a genuine missing
+			// path to ENOENT while other failures surface as EIO.
+			return nil, fmt.Errorf("resolve %q: %q not found in %q: %w", fsPath, part, currentPath, iofs.ErrNotExist)
 		}
 	}
 
@@ -362,7 +365,7 @@ func (h *DriveHandler) resolvePathEntry(ctx context.Context, fsPath string) (*pa
 	h.mu.RUnlock()
 	if !ok {
 		// The final component should be cached from the walk.
-		return nil, fmt.Errorf("resolve %q: path not found after walk", fsPath)
+		return nil, fmt.Errorf("resolve %q: path not found after walk: %w", fsPath, iofs.ErrNotExist)
 	}
 	return pe, nil
 }

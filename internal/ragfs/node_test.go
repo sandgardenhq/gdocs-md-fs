@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	iofs "io/fs"
 	"log"
 	"strings"
 	"syscall"
@@ -1942,5 +1943,36 @@ func TestDirRmdir_ListError_ReturnsEIO(t *testing.T) {
 	errno := d.Rmdir(context.Background(), "sub")
 	if errno != syscall.EIO {
 		t.Fatalf("Rmdir returned errno %d, want EIO", errno)
+	}
+}
+
+func TestDirLookup_StatIOError_ReturnsEIO(t *testing.T) {
+	// A backend failure must surface as EIO, not ENOENT: reporting
+	// "file does not exist" during an outage tells sync tools the file
+	// was deleted.
+	h := &stubHandler{
+		statFn: func(string) (*Entry, error) { return nil, fmt.Errorf("network down") },
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	var out fuse.EntryOut
+	_, errno := d.Lookup(context.Background(), "doc.md", &out)
+	if errno != syscall.EIO {
+		t.Fatalf("Lookup returned errno %d (%v), want EIO", errno, errno)
+	}
+}
+
+func TestDirLookup_StatNotExist_ReturnsENOENT(t *testing.T) {
+	h := &stubHandler{
+		statFn: func(p string) (*Entry, error) {
+			return nil, fmt.Errorf("gdrive: stat %q: %w", p, iofs.ErrNotExist)
+		},
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	var out fuse.EntryOut
+	_, errno := d.Lookup(context.Background(), "doc.md", &out)
+	if errno != syscall.ENOENT {
+		t.Fatalf("Lookup returned errno %d (%v), want ENOENT", errno, errno)
 	}
 }

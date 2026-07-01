@@ -23,6 +23,8 @@ type Handler interface {
 	Rename(ctx context.Context, oldPath, newPath string) error
 
 	// Stat returns metadata for the file or directory at the given path.
+	// When the path does not exist, the returned error wraps io/fs.ErrNotExist
+	// so callers can distinguish not-found (ENOENT) from I/O failures (EIO).
 	Stat(ctx context.Context, path string) (*Entry, error)
 
 	// Create creates a new file at the given path.
