@@ -51,14 +51,62 @@ type TempFile struct {
 
 // compile-time interface checks
 var (
-	_ fs.InodeEmbedder = (*TempFile)(nil)
-	_ fs.NodeGetattrer = (*TempFile)(nil)
-	_ fs.NodeSetattrer = (*TempFile)(nil)
-	_ fs.NodeOpener    = (*TempFile)(nil)
-	_ fs.NodeReader    = (*TempFile)(nil)
-	_ fs.NodeWriter    = (*TempFile)(nil)
-	_ fs.NodeFlusher   = (*TempFile)(nil)
+	_ fs.InodeEmbedder     = (*TempFile)(nil)
+	_ fs.NodeGetattrer     = (*TempFile)(nil)
+	_ fs.NodeSetattrer     = (*TempFile)(nil)
+	_ fs.NodeOpener        = (*TempFile)(nil)
+	_ fs.NodeReader        = (*TempFile)(nil)
+	_ fs.NodeWriter        = (*TempFile)(nil)
+	_ fs.NodeFlusher       = (*TempFile)(nil)
+	_ fs.NodeFsyncer       = (*TempFile)(nil)
+	_ fs.NodeStatfser      = (*TempFile)(nil)
+	_ fs.NodeGetlker       = (*TempFile)(nil)
+	_ fs.NodeSetlker       = (*TempFile)(nil)
+	_ fs.NodeSetlkwer      = (*TempFile)(nil)
+	_ fs.NodeSetxattrer    = (*TempFile)(nil)
+	_ fs.NodeRemovexattrer = (*TempFile)(nil)
 )
+
+// Statfs returns the same filesystem statistics as directories; see fillStatfs.
+func (tf *TempFile) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
+	fillStatfs(out)
+	return fs.OK
+}
+
+// Getlk reports that no lock conflicts with the request; locks are advisory
+// no-ops (see File.Getlk). Office suites lock their temp companion files.
+func (tf *TempFile) Getlk(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32, out *fuse.FileLock) syscall.Errno {
+	out.Typ = syscall.F_UNLCK
+	return fs.OK
+}
+
+// Setlk acquires a lock as an advisory no-op; see File.Getlk.
+func (tf *TempFile) Setlk(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32) syscall.Errno {
+	return fs.OK
+}
+
+// Setlkw acquires a lock, waiting if needed, as an advisory no-op; see File.Getlk.
+func (tf *TempFile) Setlkw(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32) syscall.Errno {
+	return fs.OK
+}
+
+// Fsync is a no-op: temp files are ephemeral and in-memory, but editors
+// fsync them before renaming and treat an error as a failed save.
+func (tf *TempFile) Fsync(_ context.Context, _ fs.FileHandle, _ uint32) syscall.Errno {
+	return fs.OK
+}
+
+// Setxattr reports that the filesystem does not support extended attributes.
+// See File.Setxattr for the rationale; editors write temp files via the same
+// macOS copyfile path that aborts on the go-fuse default ENOATTR.
+func (tf *TempFile) Setxattr(_ context.Context, _ string, _ []byte, _ uint32) syscall.Errno {
+	return syscall.ENOTSUP
+}
+
+// Removexattr reports that the filesystem does not support extended attributes.
+func (tf *TempFile) Removexattr(_ context.Context, _ string) syscall.Errno {
+	return syscall.ENOTSUP
+}
 
 func newTempFile(name string, uid, gid uint32) *TempFile {
 	return &TempFile{

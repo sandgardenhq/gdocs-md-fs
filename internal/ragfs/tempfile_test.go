@@ -36,8 +36,8 @@ func TestIsTempFile_NonTemp(t *testing.T) {
 		"my-file.md",
 		".hidden",
 		"backup",
-		"49130",     // not exactly "4913"
-		"a4913",     // not exactly "4913"
+		"49130", // not exactly "4913"
+		"a4913", // not exactly "4913"
 	}
 	for _, name := range nonTemps {
 		if isTempFile(name) {
@@ -262,5 +262,67 @@ func TestTempFile_Setattr_NoSize(t *testing.T) {
 	}
 	if out.Size != 4 {
 		t.Errorf("size: got %d, want 4", out.Size)
+	}
+}
+
+func TestTempFileSetxattr_ReturnsENOTSUP(t *testing.T) {
+	// macOS copyfile aborts a copy when setxattr returns ENOATTR (the
+	// go-fuse default); ENOTSUP makes it skip xattrs silently, matching
+	// the behavior of File and Dir.
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	errno := tf.Setxattr(context.Background(), "com.apple.lastuseddate#PS", []byte("v"), 0)
+	if errno != syscall.ENOTSUP {
+		t.Errorf("Setxattr returned errno %d (%v), want ENOTSUP", errno, errno)
+	}
+}
+
+func TestTempFileRemovexattr_ReturnsENOTSUP(t *testing.T) {
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	errno := tf.Removexattr(context.Background(), "com.apple.lastuseddate#PS")
+	if errno != syscall.ENOTSUP {
+		t.Errorf("Removexattr returned errno %d (%v), want ENOTSUP", errno, errno)
+	}
+}
+
+func TestTempFileFsync_ReturnsOK(t *testing.T) {
+	// Temp files are ephemeral and never synced to the backend, but fsync
+	// on them must still succeed for editors that fsync before rename.
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	errno := tf.Fsync(context.Background(), nil, 0)
+	if errno != 0 {
+		t.Errorf("Fsync returned errno %d, want 0", errno)
+	}
+}
+
+func TestTempFileStatfs_MatchesDirStatfs(t *testing.T) {
+	var fromDir, fromTemp fuse.StatfsOut
+	if errno := (&Dir{}).Statfs(context.Background(), &fromDir); errno != 0 {
+		t.Fatalf("Dir Statfs returned errno %d", errno)
+	}
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	if errno := tf.Statfs(context.Background(), &fromTemp); errno != 0 {
+		t.Fatalf("TempFile Statfs returned errno %d", errno)
+	}
+	if fromTemp != fromDir {
+		t.Errorf("TempFile Statfs = %+v, want same as Dir Statfs %+v", fromTemp, fromDir)
+	}
+}
+
+func TestTempFileLocks_ReturnOK(t *testing.T) {
+	// Office suites lock their temp/lock companion files on open.
+	tf := newTempFile("~$document.docx", 501, 20)
+	lk := &fuse.FileLock{Typ: syscall.F_WRLCK}
+	var out fuse.FileLock
+	if errno := tf.Getlk(context.Background(), nil, 1, lk, 0, &out); errno != 0 {
+		t.Errorf("Getlk returned errno %d, want 0", errno)
+	}
+	if out.Typ != syscall.F_UNLCK {
+		t.Errorf("out.Typ = %d, want F_UNLCK (%d)", out.Typ, syscall.F_UNLCK)
+	}
+	if errno := tf.Setlk(context.Background(), nil, 1, lk, 0); errno != 0 {
+		t.Errorf("Setlk returned errno %d, want 0", errno)
+	}
+	if errno := tf.Setlkw(context.Background(), nil, 1, lk, 0); errno != 0 {
+		t.Errorf("Setlkw returned errno %d, want 0", errno)
 	}
 }

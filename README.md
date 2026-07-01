@@ -67,6 +67,15 @@ Writes are buffered in memory and persisted to Google Drive when the file descri
 - **Rate limiting** (HTTP 429/5xx): exponential backoff with jitter, up to 5 retries
 - **Concurrent edits**: when a dirty file is re-opened, the remote is re-fetched and compared to the baseline read at first open. If the remote has changed, local edits are discarded and the open returns `ESTALE` rather than overwriting the newer remote version.
 
+### Unsupported filesystem operations
+
+Google Drive cannot represent some POSIX concepts, so the following are intentional limitations:
+
+- **Symlinks, hard links, and device nodes**: `ln`, `ln -s`, and `mknod` fail with "operation not supported"
+- **Extended attributes**: setting xattrs reports "not supported"; macOS `cp` and Finder skip them silently
+- **File locks** (`flock`/`fcntl`): accepted as advisory no-ops — they always succeed and never conflict, since a mount is single-user and Drive offers no cross-client locking
+- **Permissions and timestamps**: `chmod`, `chown`, and `touch` succeed but change nothing; modes are fixed (directories `0755`, Google Docs `0644`, other files read-only `0444`) and times come from Drive
+
 ## Requirements
 
 - **Go 1.25+** (for building from source)

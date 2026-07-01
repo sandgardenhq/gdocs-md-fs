@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	iofs "io/fs"
 	"log"
 	"strings"
 	"syscall"
@@ -23,6 +24,11 @@ type stubHandler struct {
 	createEntry  *Entry
 	createErr    error
 	createCalled bool
+	// Optional overrides; when nil the method returns "not implemented".
+	listFn   func(path string) ([]Entry, error)
+	deleteFn func(path string) error
+	renameFn func(oldPath, newPath string) error
+	statFn   func(path string) (*Entry, error)
 }
 
 func (h *stubHandler) Read(_ context.Context, _ string) ([]byte, error) {
@@ -34,16 +40,28 @@ func (h *stubHandler) Write(_ context.Context, _ string, data []byte) error {
 	copy(h.lastWritten, data)
 	return h.writeErr
 }
-func (h *stubHandler) List(_ context.Context, _ string) ([]Entry, error) {
+func (h *stubHandler) List(_ context.Context, p string) ([]Entry, error) {
+	if h.listFn != nil {
+		return h.listFn(p)
+	}
 	return nil, fmt.Errorf("not implemented")
 }
-func (h *stubHandler) Delete(_ context.Context, _ string) error {
+func (h *stubHandler) Delete(_ context.Context, p string) error {
+	if h.deleteFn != nil {
+		return h.deleteFn(p)
+	}
 	return fmt.Errorf("not implemented")
 }
-func (h *stubHandler) Rename(_ context.Context, _, _ string) error {
+func (h *stubHandler) Rename(_ context.Context, oldPath, newPath string) error {
+	if h.renameFn != nil {
+		return h.renameFn(oldPath, newPath)
+	}
 	return fmt.Errorf("not implemented")
 }
-func (h *stubHandler) Stat(_ context.Context, _ string) (*Entry, error) {
+func (h *stubHandler) Stat(_ context.Context, p string) (*Entry, error) {
+	if h.statFn != nil {
+		return h.statFn(p)
+	}
 	return nil, fmt.Errorf("not implemented")
 }
 func (h *stubHandler) Create(_ context.Context, _ string, _ bool) (*Entry, error) {
@@ -1140,7 +1158,6 @@ func TestFileOpen_ConcurrentWriteAndOpen_NoRace(t *testing.T) {
 	<-done
 }
 
-
 func TestDirUnlink_TempFile_RemovesFromMap(t *testing.T) {
 	d := &Dir{
 		handler:   &stubHandler{},
@@ -1599,5 +1616,631 @@ func TestCreateFuseFlags_IncludesDirectIO(t *testing.T) {
 	// Verify the constant value so we can check Create's source.
 	if fuse.FOPEN_DIRECT_IO == 0 {
 		t.Fatal("FOPEN_DIRECT_IO is zero; test is invalid")
+	}
+}
+
+func TestFileFsync_PersistsDirtyContent(t *testing.T) {
+	// fsync(2) must persist pending writes: editors (vim), git, and rsync
+	// call it on save and treat an error as a failed write.
+	h := &stubHandler{readContent: []byte{}}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	data := []byte("# Synced\n")
+	_, _ = f.Write(context.Background(), nil, data, 0)
+
+	h.writeCalled = false
+	errno := f.Fsync(context.Background(), nil, 0)
+	if errno != 0 {
+		t.Fatalf("Fsync returned errno %d", errno)
+	}
+	if !h.writeCalled {
+		t.Error("Fsync must call handler.Write to persist dirty content")
+	}
+	if string(h.lastWritten) != string(data) {
+		t.Errorf("Fsync wrote %q, want %q", h.lastWritten, data)
+	}
+	if f.dirty {
+		t.Error("dirty should be false after successful Fsync")
+	}
+}
+
+func TestFileFsync_CleanFile_DoesNotCallHandler(t *testing.T) {
+	h := &stubHandler{readContent: []byte{}}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	errno := f.Fsync(context.Background(), nil, 0)
+	if errno != 0 {
+		t.Fatalf("Fsync returned errno %d", errno)
+	}
+	if h.writeCalled {
+		t.Error("Fsync must not call handler.Write for a clean file")
+	}
+}
+
+func TestDirFsync_ReturnsOK(t *testing.T) {
+	// FSYNCDIR is dispatched to NodeFsyncer on the directory; tools fsync
+	// the parent directory after a rename for durability.
+	d := &Dir{}
+	errno := d.Fsync(context.Background(), nil, 0)
+	if errno != 0 {
+		t.Errorf("Dir Fsync returned errno %d, want 0", errno)
+	}
+}
+
+func TestDirSetattr_AcceptsTimesAndMode(t *testing.T) {
+	// cp -Rp, rsync -a, and tar -x set directory times/modes as their
+	// final step; the go-fuse default ENOTSUP makes the whole copy fail.
+	// Drive has no POSIX modes or settable dir times, so accept and
+	// report current attributes.
+	d := &Dir{
+		uid:   501,
+		gid:   20,
+		entry: &Entry{IsDir: true, ModTime: time.Unix(5000, 0)},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_MODE | fuse.FATTR_MTIME
+	in.Mode = 0o700
+	in.Mtime = 12345
+	var out fuse.AttrOut
+	errno := d.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d, want 0", errno)
+	}
+
+	if out.Mode != syscall.S_IFDIR|0o755 {
+		t.Errorf("out.Mode = %o, want %o (directory mode is fixed)", out.Mode, syscall.S_IFDIR|0o755)
+	}
+	if out.Uid != 501 || out.Gid != 20 {
+		t.Errorf("out uid/gid = %d/%d, want 501/20", out.Uid, out.Gid)
+	}
+	if out.Mtime != 5000 {
+		t.Errorf("out.Mtime = %d, want 5000 (entry mtime)", out.Mtime)
+	}
+}
+
+func TestFileStatfs_MatchesDirStatfs(t *testing.T) {
+	// statfs(2) is dispatched to the node it targets; files that don't
+	// implement it report zero blocks free, which makes editors checking
+	// free space before save refuse to write.
+	var fromDir, fromFile fuse.StatfsOut
+	if errno := (&Dir{}).Statfs(context.Background(), &fromDir); errno != 0 {
+		t.Fatalf("Dir Statfs returned errno %d", errno)
+	}
+	f := &File{}
+	if errno := f.Statfs(context.Background(), &fromFile); errno != 0 {
+		t.Fatalf("File Statfs returned errno %d", errno)
+	}
+	if fromFile != fromDir {
+		t.Errorf("File Statfs = %+v, want same as Dir Statfs %+v", fromFile, fromDir)
+	}
+	if fromFile.Bavail == 0 {
+		t.Error("Statfs must report free space, got Bavail=0")
+	}
+}
+
+func TestFileGetlk_ReportsUnlocked(t *testing.T) {
+	// A single-user FUSE mount has no competing lockers; report that the
+	// requested region is unlocked so fcntl(F_GETLK) probes succeed.
+	f := &File{}
+	lk := &fuse.FileLock{Typ: syscall.F_WRLCK, Start: 0, End: 100}
+	var out fuse.FileLock
+	errno := f.Getlk(context.Background(), nil, 1, lk, 0, &out)
+	if errno != 0 {
+		t.Fatalf("Getlk returned errno %d, want 0", errno)
+	}
+	if out.Typ != syscall.F_UNLCK {
+		t.Errorf("out.Typ = %d, want F_UNLCK (%d)", out.Typ, syscall.F_UNLCK)
+	}
+}
+
+func TestFileSetlk_ReturnsOK(t *testing.T) {
+	// flock/fcntl locks always succeed: apps like LibreOffice and sqlite
+	// refuse to open files on filesystems where locking returns ENOTSUP.
+	f := &File{}
+	lk := &fuse.FileLock{Typ: syscall.F_WRLCK}
+	if errno := f.Setlk(context.Background(), nil, 1, lk, 0); errno != 0 {
+		t.Errorf("Setlk returned errno %d, want 0", errno)
+	}
+	if errno := f.Setlkw(context.Background(), nil, 1, lk, 0); errno != 0 {
+		t.Errorf("Setlkw returned errno %d, want 0", errno)
+	}
+}
+
+func TestFileSetattr_ShrinkTruncatesContent(t *testing.T) {
+	// truncate(2) to a nonzero size must actually resize the content and
+	// mark the file dirty, not just update the reported size.
+	content := []byte("0123456789")
+	h := &stubHandler{readContent: content}
+	cache := NewCache()
+	cache.PutContent("doc.md", content)
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: 10},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 4
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+
+	if string(f.pendingData) != "0123" {
+		t.Errorf("pendingData = %q, want %q", f.pendingData, "0123")
+	}
+	if !f.dirty {
+		t.Error("file must be dirty after truncation")
+	}
+	if f.entry.Size != 4 {
+		t.Errorf("entry.Size = %d, want 4", f.entry.Size)
+	}
+	if cached := cache.GetContent("doc.md"); string(cached) != "0123" {
+		t.Errorf("cached content = %q, want %q", cached, "0123")
+	}
+}
+
+func TestFileSetattr_GrowPadsWithZeros(t *testing.T) {
+	content := []byte("ab")
+	h := &stubHandler{readContent: content}
+	cache := NewCache()
+	cache.PutContent("doc.md", content)
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: 2},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 5
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+
+	want := "ab\x00\x00\x00"
+	if string(f.pendingData) != want {
+		t.Errorf("pendingData = %q, want %q", f.pendingData, want)
+	}
+	if !f.dirty {
+		t.Error("file must be dirty after truncation")
+	}
+}
+
+func TestFileSetattr_ShrinkUncached_ReadsHandler(t *testing.T) {
+	// With no cached or pending content, truncation needs the real
+	// content from the backend to shrink it.
+	h := &stubHandler{readContent: []byte("0123456789")}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: 10},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 3
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+	if string(f.pendingData) != "012" {
+		t.Errorf("pendingData = %q, want %q", f.pendingData, "012")
+	}
+}
+
+func TestFileSetattr_ShrinkReadError_ReturnsEIO(t *testing.T) {
+	h := &stubHandler{readErr: fmt.Errorf("network down")}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: 10},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 3
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != syscall.EIO {
+		t.Fatalf("Setattr returned errno %d, want EIO", errno)
+	}
+	if f.dirty {
+		t.Error("file must not be dirty after failed truncation")
+	}
+}
+
+func TestDirRmdir_NonEmpty_ReturnsENOTEMPTY(t *testing.T) {
+	// POSIX requires rmdir to fail on a non-empty directory. Delegating
+	// to handler.Delete would silently trash the whole subtree in Drive.
+	deleteCalled := false
+	h := &stubHandler{
+		listFn: func(string) ([]Entry, error) {
+			return []Entry{{Name: "child.md", MimeType: mimeGoogleDoc}}, nil
+		},
+		deleteFn: func(string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	errno := d.Rmdir(context.Background(), "sub")
+	if errno != syscall.ENOTEMPTY {
+		t.Fatalf("Rmdir returned errno %d, want ENOTEMPTY", errno)
+	}
+	if deleteCalled {
+		t.Error("Rmdir must not delete a non-empty directory")
+	}
+}
+
+func TestDirRmdir_Empty_DeletesAndInvalidates(t *testing.T) {
+	var deletedPath string
+	h := &stubHandler{
+		listFn:   func(string) ([]Entry, error) { return nil, nil },
+		deleteFn: func(p string) error { deletedPath = p; return nil },
+	}
+	cache := NewCache()
+	// Stale cached state under the dir being removed.
+	cache.PutMetaList("parent", []Entry{{Name: "sub", IsDir: true}})
+	cache.PutContent("parent/sub/old.md", []byte("stale"))
+	d := &Dir{handler: h, cache: cache, path: "parent"}
+
+	errno := d.Rmdir(context.Background(), "sub")
+	if errno != 0 {
+		t.Fatalf("Rmdir returned errno %d, want 0", errno)
+	}
+	if deletedPath != "parent/sub" {
+		t.Errorf("deleted path = %q, want %q", deletedPath, "parent/sub")
+	}
+	if cache.GetMetaList("parent") != nil {
+		t.Error("parent meta list should be invalidated")
+	}
+	if cache.GetContent("parent/sub/old.md") != nil {
+		t.Error("cached content under the removed dir should be invalidated")
+	}
+}
+
+func TestDirRmdir_UsesCachedListing(t *testing.T) {
+	// A cached non-empty listing answers ENOTEMPTY without an API call.
+	h := &stubHandler{} // List returns an error if called
+	cache := NewCache()
+	cache.PutMetaList("parent/sub", []Entry{{Name: "child.md"}})
+	d := &Dir{handler: h, cache: cache, path: "parent"}
+
+	errno := d.Rmdir(context.Background(), "sub")
+	if errno != syscall.ENOTEMPTY {
+		t.Fatalf("Rmdir returned errno %d, want ENOTEMPTY", errno)
+	}
+}
+
+func TestDirRmdir_ListError_ReturnsEIO(t *testing.T) {
+	h := &stubHandler{
+		listFn: func(string) ([]Entry, error) { return nil, fmt.Errorf("network down") },
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	errno := d.Rmdir(context.Background(), "sub")
+	if errno != syscall.EIO {
+		t.Fatalf("Rmdir returned errno %d, want EIO", errno)
+	}
+}
+
+func TestDirLookup_StatIOError_ReturnsEIO(t *testing.T) {
+	// A backend failure must surface as EIO, not ENOENT: reporting
+	// "file does not exist" during an outage tells sync tools the file
+	// was deleted.
+	h := &stubHandler{
+		statFn: func(string) (*Entry, error) { return nil, fmt.Errorf("network down") },
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	var out fuse.EntryOut
+	_, errno := d.Lookup(context.Background(), "doc.md", &out)
+	if errno != syscall.EIO {
+		t.Fatalf("Lookup returned errno %d (%v), want EIO", errno, errno)
+	}
+}
+
+func TestDirLookup_StatNotExist_ReturnsENOENT(t *testing.T) {
+	h := &stubHandler{
+		statFn: func(p string) (*Entry, error) {
+			return nil, fmt.Errorf("gdrive: stat %q: %w", p, iofs.ErrNotExist)
+		},
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	var out fuse.EntryOut
+	_, errno := d.Lookup(context.Background(), "doc.md", &out)
+	if errno != syscall.ENOENT {
+		t.Fatalf("Lookup returned errno %d (%v), want ENOENT", errno, errno)
+	}
+}
+
+func TestDirCreate_OEXCL_Existing_ReturnsEEXIST(t *testing.T) {
+	// open(O_CREAT|O_EXCL) on an existing name must fail; Drive allows
+	// duplicate names, so handler.Create would silently make a second doc.
+	h := &stubHandler{}
+	cache := NewCache()
+	cache.PutMetaList("parent", []Entry{{Name: "doc.md", MimeType: mimeGoogleDoc}})
+	d := &Dir{handler: h, cache: cache, path: "parent"}
+
+	var out fuse.EntryOut
+	_, _, _, errno := d.Create(context.Background(), "doc.md",
+		uint32(syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY), 0o644, &out)
+	if errno != syscall.EEXIST {
+		t.Fatalf("Create returned errno %d (%v), want EEXIST", errno, errno)
+	}
+	if h.createCalled {
+		t.Error("handler.Create must not be called when the name exists")
+	}
+}
+
+func TestDirCreate_OEXCL_StatNotExist_Proceeds(t *testing.T) {
+	// No cached listing: existence is checked via handler.Stat. A
+	// missing file lets creation proceed (verified by handler.Create
+	// being reached; inode creation needs a mounted bridge, so an error
+	// return from Create is used to stop before NewInode).
+	h := &stubHandler{
+		statFn: func(p string) (*Entry, error) {
+			return nil, fmt.Errorf("stat %q: %w", p, iofs.ErrNotExist)
+		},
+		createErr: fmt.Errorf("stop before NewInode"),
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	var out fuse.EntryOut
+	_, _, _, errno := d.Create(context.Background(), "doc.md",
+		uint32(syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY), 0o644, &out)
+	if errno != syscall.EIO {
+		t.Fatalf("Create returned errno %d, want EIO from createErr sentinel", errno)
+	}
+	if !h.createCalled {
+		t.Error("handler.Create should be reached when the name does not exist")
+	}
+}
+
+func TestDirCreate_OEXCL_TempExists_ReturnsEEXIST(t *testing.T) {
+	d := &Dir{
+		handler:   &stubHandler{},
+		cache:     NewCache(),
+		path:      "parent",
+		tempFiles: map[string]*TempFile{".doc.md.tmp": newTempFile(".doc.md.tmp", 501, 20)},
+	}
+
+	var out fuse.EntryOut
+	_, _, _, errno := d.Create(context.Background(), ".doc.md.tmp",
+		uint32(syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY), 0o644, &out)
+	if errno != syscall.EEXIST {
+		t.Fatalf("Create returned errno %d (%v), want EEXIST", errno, errno)
+	}
+}
+
+func TestDirRename_NoReplace_DestExists_ReturnsEEXIST(t *testing.T) {
+	// RENAME_NOREPLACE (Linux, 0x1) and RENAME_EXCL (macOS, 0x4) promise
+	// EEXIST when the destination exists.
+	renameCalled := false
+	h := &stubHandler{
+		renameFn: func(_, _ string) error { renameCalled = true; return nil },
+	}
+	cache := NewCache()
+	cache.PutMetaList("parent", []Entry{
+		{Name: "src.md", MimeType: mimeGoogleDoc},
+		{Name: "dst.md", MimeType: mimeGoogleDoc},
+	})
+	d := &Dir{handler: h, cache: cache, path: "parent"}
+
+	for _, flag := range []uint32{0x1, 0x4} {
+		errno := d.Rename(context.Background(), "src.md", d, "dst.md", flag)
+		if errno != syscall.EEXIST {
+			t.Errorf("Rename flags=%#x returned errno %d (%v), want EEXIST", flag, errno, errno)
+		}
+	}
+	if renameCalled {
+		t.Error("handler.Rename must not be called when NOREPLACE dest exists")
+	}
+}
+
+func TestDirRename_DestExists_ReplacedNotDuplicated(t *testing.T) {
+	// POSIX rename atomically replaces an existing destination. Drive
+	// permits duplicate names, so the old destination must be deleted
+	// before the rename or both files survive under the same name.
+	var calls []string
+	h := &stubHandler{
+		deleteFn: func(p string) error { calls = append(calls, "delete:"+p); return nil },
+		renameFn: func(o, n string) error { calls = append(calls, "rename:"+o+"->"+n); return nil },
+	}
+	cache := NewCache()
+	cache.PutMetaList("parent", []Entry{
+		{Name: "src.md", MimeType: mimeGoogleDoc},
+		{Name: "dst.md", MimeType: mimeGoogleDoc},
+	})
+	d := &Dir{handler: h, cache: cache, path: "parent"}
+
+	errno := d.Rename(context.Background(), "src.md", d, "dst.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d, want 0", errno)
+	}
+	want := []string{"delete:parent/dst.md", "rename:parent/src.md->parent/dst.md"}
+	if len(calls) != 2 || calls[0] != want[0] || calls[1] != want[1] {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestDirRename_DestAbsent_NoDelete(t *testing.T) {
+	deleteCalled := false
+	h := &stubHandler{
+		deleteFn: func(string) error { deleteCalled = true; return nil },
+		renameFn: func(_, _ string) error { return nil },
+		statFn: func(p string) (*Entry, error) {
+			return nil, fmt.Errorf("stat %q: %w", p, iofs.ErrNotExist)
+		},
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	errno := d.Rename(context.Background(), "src.md", d, "dst.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d, want 0", errno)
+	}
+	if deleteCalled {
+		t.Error("handler.Delete must not be called when the destination is absent")
+	}
+}
+
+func TestDirRename_TempPromote_DestExists_WritesExistingDoc(t *testing.T) {
+	// Editor atomic save (write .tmp, rename over doc.md) targets a doc
+	// that already exists; creating a new one would duplicate it in Drive.
+	h := &stubHandler{}
+	cache := NewCache()
+	cache.PutMetaList("parent", []Entry{{Name: "doc.md", MimeType: mimeGoogleDoc}})
+	d := &Dir{
+		handler:   h,
+		cache:     cache,
+		path:      "parent",
+		tempFiles: map[string]*TempFile{".doc.md.tmp": newTempFile(".doc.md.tmp", 501, 20)},
+	}
+	d.tempFiles[".doc.md.tmp"].data = []byte("# Saved\n")
+
+	errno := d.Rename(context.Background(), ".doc.md.tmp", d, "doc.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d, want 0", errno)
+	}
+	if h.createCalled {
+		t.Error("promote over an existing doc must not create a duplicate")
+	}
+	if !h.writeCalled {
+		t.Error("promote must write the temp content into the existing doc")
+	}
+	if string(h.lastWritten) != "# Saved\n" {
+		t.Errorf("wrote %q, want %q", h.lastWritten, "# Saved\n")
+	}
+}
+
+func TestDirRename_TempPromote_NoReplace_ReturnsEEXIST(t *testing.T) {
+	h := &stubHandler{}
+	cache := NewCache()
+	cache.PutMetaList("parent", []Entry{{Name: "doc.md", MimeType: mimeGoogleDoc}})
+	d := &Dir{
+		handler:   h,
+		cache:     cache,
+		path:      "parent",
+		tempFiles: map[string]*TempFile{".doc.md.tmp": newTempFile(".doc.md.tmp", 501, 20)},
+	}
+
+	errno := d.Rename(context.Background(), ".doc.md.tmp", d, "doc.md", 0x1)
+	if errno != syscall.EEXIST {
+		t.Fatalf("Rename returned errno %d (%v), want EEXIST", errno, errno)
+	}
+	// The temp file must survive the failed rename.
+	d.tempMu.RLock()
+	_, ok := d.tempFiles[".doc.md.tmp"]
+	d.tempMu.RUnlock()
+	if !ok {
+		t.Error("temp file must be preserved when NOREPLACE rename fails")
+	}
+}
+
+func TestDirRename_TempToTemp_NoReplace_DestExists_ReturnsEEXIST(t *testing.T) {
+	d := &Dir{
+		handler: &stubHandler{},
+		cache:   NewCache(),
+		path:    "parent",
+		tempFiles: map[string]*TempFile{
+			".a.swp": newTempFile(".a.swp", 501, 20),
+			".b.swp": newTempFile(".b.swp", 501, 20),
+		},
+	}
+
+	errno := d.Rename(context.Background(), ".a.swp", d, ".b.swp", 0x1)
+	if errno != syscall.EEXIST {
+		t.Fatalf("Rename returned errno %d (%v), want EEXIST", errno, errno)
+	}
+}
+
+func TestDirRename_DestExistsViaStat_Replaced(t *testing.T) {
+	// With no cached listing, destination existence comes from Stat.
+	var calls []string
+	h := &stubHandler{
+		statFn: func(p string) (*Entry, error) {
+			if p == "parent/dst.md" {
+				return &Entry{Name: "dst.md", MimeType: mimeGoogleDoc}, nil
+			}
+			return nil, fmt.Errorf("stat %q: %w", p, iofs.ErrNotExist)
+		},
+		deleteFn: func(p string) error { calls = append(calls, "delete:"+p); return nil },
+		renameFn: func(o, n string) error { calls = append(calls, "rename:"+o+"->"+n); return nil },
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	errno := d.Rename(context.Background(), "src.md", d, "dst.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d, want 0", errno)
+	}
+	want := []string{"delete:parent/dst.md", "rename:parent/src.md->parent/dst.md"}
+	if len(calls) != 2 || calls[0] != want[0] || calls[1] != want[1] {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestDirCreate_OEXCL_StatIOError_ReturnsEIO(t *testing.T) {
+	// If existence cannot be determined, O_EXCL must not risk creating
+	// a duplicate; surface the failure instead.
+	h := &stubHandler{
+		statFn: func(string) (*Entry, error) { return nil, fmt.Errorf("network down") },
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	var out fuse.EntryOut
+	_, _, _, errno := d.Create(context.Background(), "doc.md",
+		uint32(syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY), 0o644, &out)
+	if errno != syscall.EIO {
+		t.Fatalf("Create returned errno %d (%v), want EIO", errno, errno)
+	}
+	if h.createCalled {
+		t.Error("handler.Create must not be called when existence is unknown")
+	}
+}
+
+func TestFileSetattr_TruncateUsesPendingData(t *testing.T) {
+	// Unflushed writes are the freshest content; truncation must resize
+	// them rather than stale cache or remote content.
+	h := &stubHandler{readContent: []byte("remote")}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+	_, _ = f.Write(context.Background(), nil, []byte("pending!"), 0)
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 7
+	var out fuse.AttrOut
+	if errno := f.Setattr(context.Background(), nil, in, &out); errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+	if string(f.pendingData) != "pending" {
+		t.Errorf("pendingData = %q, want %q", f.pendingData, "pending")
 	}
 }

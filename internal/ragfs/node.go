@@ -3,6 +3,8 @@ package ragfs
 import (
 	"bytes"
 	"context"
+	"errors"
+	iofs "io/fs"
 	"log"
 	"path"
 	"sync"
@@ -17,12 +19,12 @@ import (
 type Dir struct {
 	fs.Inode
 
-	handler Handler
-	cache   *Cache
-	path    string
-	entry   *Entry
-	uid     uint32
-	gid     uint32
+	handler   Handler
+	cache     *Cache
+	path      string
+	entry     *Entry
+	uid       uint32
+	gid       uint32
 	server    *Server
 	logger    *log.Logger
 	tempMu    sync.RWMutex
@@ -31,17 +33,35 @@ type Dir struct {
 
 // compile-time interface checks
 var (
-	_ fs.InodeEmbedder = (*Dir)(nil)
-	_ fs.NodeReaddirer = (*Dir)(nil)
-	_ fs.NodeLookuper  = (*Dir)(nil)
-	_ fs.NodeCreater   = (*Dir)(nil)
-	_ fs.NodeUnlinker  = (*Dir)(nil)
-	_ fs.NodeRenamer   = (*Dir)(nil)
-	_ fs.NodeMkdirer   = (*Dir)(nil)
-	_ fs.NodeStatfser  = (*Dir)(nil)
+	_ fs.InodeEmbedder     = (*Dir)(nil)
+	_ fs.NodeReaddirer     = (*Dir)(nil)
+	_ fs.NodeLookuper      = (*Dir)(nil)
+	_ fs.NodeCreater       = (*Dir)(nil)
+	_ fs.NodeUnlinker      = (*Dir)(nil)
+	_ fs.NodeRenamer       = (*Dir)(nil)
+	_ fs.NodeMkdirer       = (*Dir)(nil)
+	_ fs.NodeStatfser      = (*Dir)(nil)
+	_ fs.NodeSetattrer     = (*Dir)(nil)
+	_ fs.NodeFsyncer       = (*Dir)(nil)
 	_ fs.NodeSetxattrer    = (*Dir)(nil)
 	_ fs.NodeRemovexattrer = (*Dir)(nil)
 )
+
+// Setattr accepts chmod/chown/utimens on directories as a no-op and reports
+// current attributes. Google Drive has no POSIX modes or settable directory
+// times, but recursive copies (cp -Rp, rsync -a, tar -x) set them as their
+// final step and fail entirely on the go-fuse default ENOTSUP.
+func (d *Dir) Setattr(ctx context.Context, fh fs.FileHandle, _ *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	return d.Getattr(ctx, fh, out)
+}
+
+// Fsync on a directory (FSYNCDIR) is a no-op: directory metadata lives in
+// Google Drive and every mutation is persisted synchronously, so there is
+// nothing to flush. Tools fsync the parent directory after a rename for
+// durability and treat the go-fuse default ENOTSUP as a failure.
+func (d *Dir) Fsync(_ context.Context, _ fs.FileHandle, _ uint32) syscall.Errno {
+	return fs.OK
+}
 
 // Setxattr reports that the filesystem does not support extended attributes.
 // See File.Setxattr for the rationale; directories are targeted by recursive
@@ -101,10 +121,15 @@ func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 		}
 	}
 
-	// Fall back to Stat.
+	// Fall back to Stat. Only a genuine not-found maps to ENOENT; other
+	// failures (network, API) must surface as EIO, or an outage would
+	// tell callers files were deleted.
 	entry, err := d.handler.Stat(ctx, childPath)
 	if err != nil {
-		return nil, syscall.ENOENT
+		if errors.Is(err, iofs.ErrNotExist) {
+			return nil, syscall.ENOENT
+		}
+		return nil, syscall.EIO
 	}
 
 	d.cache.PutMeta(childPath, entry)
@@ -112,11 +137,48 @@ func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 	return d.childInode(ctx, entry, childPath, out), fs.OK
 }
 
+// rename(2) flags requesting that an existing destination must not be
+// replaced. go-fuse passes kernel flags through verbatim, so both the Linux
+// and macOS encodings need to be recognized.
+const (
+	renameFlagNoReplace = 0x1 // Linux RENAME_NOREPLACE
+	renameFlagExcl      = 0x4 // Darwin RENAME_EXCL (renamex_np)
+)
+
+// childExists reports whether a backend entry with the given name exists in
+// this directory, consulting the cached listing before falling back to Stat.
+// A non-zero errno means existence could not be determined.
+func (d *Dir) childExists(ctx context.Context, name string) (bool, syscall.Errno) {
+	if cached := d.cache.GetMetaList(d.path); cached != nil {
+		for i := range cached {
+			if cached[i].Name == name {
+				return true, 0
+			}
+		}
+		return false, 0
+	}
+
+	_, err := d.handler.Stat(ctx, path.Join(d.path, name))
+	if err == nil {
+		return true, 0
+	}
+	if errors.Is(err, iofs.ErrNotExist) {
+		return false, 0
+	}
+	return false, syscall.EIO
+}
+
 // Create creates a new file in this directory.
 func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	if isTempFile(name) {
 		tf := newTempFile(name, d.uid, d.gid)
 		d.tempMu.Lock()
+		if flags&syscall.O_EXCL != 0 {
+			if _, exists := d.tempFiles[name]; exists {
+				d.tempMu.Unlock()
+				return nil, nil, 0, syscall.EEXIST
+			}
+		}
 		if d.tempFiles == nil {
 			d.tempFiles = make(map[string]*TempFile)
 		}
@@ -133,6 +195,18 @@ func (d *Dir) Create(ctx context.Context, name string, flags uint32, mode uint32
 	}
 
 	childPath := path.Join(d.path, name)
+
+	// O_EXCL demands EEXIST for an existing name. Drive allows duplicate
+	// names, so handler.Create would otherwise silently make a second doc.
+	if flags&syscall.O_EXCL != 0 {
+		exists, eerrno := d.childExists(ctx, name)
+		if eerrno != 0 {
+			return nil, nil, 0, eerrno
+		}
+		if exists {
+			return nil, nil, 0, syscall.EEXIST
+		}
+	}
 
 	entry, err := d.handler.Create(ctx, childPath, false)
 	if err != nil {
@@ -183,13 +257,39 @@ func (d *Dir) Unlink(ctx context.Context, name string) syscall.Errno {
 	return fs.OK
 }
 
-// Rmdir deletes a subdirectory from this directory.
+// Rmdir deletes a subdirectory from this directory. POSIX requires rmdir to
+// fail with ENOTEMPTY on a non-empty directory; delegating straight to the
+// handler would trash the whole subtree in Drive.
 func (d *Dir) Rmdir(ctx context.Context, name string) syscall.Errno {
-	return d.Unlink(ctx, name)
+	childPath := path.Join(d.path, name)
+
+	entries := d.cache.GetMetaList(childPath)
+	if entries == nil {
+		var err error
+		entries, err = d.handler.List(ctx, childPath)
+		if err != nil {
+			return syscall.EIO
+		}
+	}
+	if len(entries) > 0 {
+		return syscall.ENOTEMPTY
+	}
+
+	if err := d.handler.Delete(ctx, childPath); err != nil {
+		return syscall.EIO
+	}
+
+	d.cache.Invalidate(d.path)
+	d.cache.Invalidate(childPath)
+	d.cache.InvalidatePrefix(childPath + "/")
+
+	return fs.OK
 }
 
 // Rename moves or renames an entry from this directory to another.
 func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	noReplace := flags&(renameFlagNoReplace|renameFlagExcl) != 0
+
 	// Renaming temp files stays in-memory, unless the destination is a
 	// non-temp name (e.g., editor atomic save: write .tmp → rename to .md).
 	d.tempMu.RLock()
@@ -201,15 +301,30 @@ func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 			return syscall.EIO
 		}
 		if !isTempFile(newName) {
-			// Promote: create the file in the backend, then write content.
+			// Promote: write the temp content into the backend. The
+			// destination usually already exists (editor atomic save
+			// targets the doc being edited); creating it again would
+			// duplicate the doc in Drive.
+			destExists, eerrno := newDir.childExists(ctx, newName)
+			if noReplace {
+				if eerrno != 0 {
+					return eerrno
+				}
+				if destExists {
+					return syscall.EEXIST
+				}
+			}
+
 			tf.mu.Lock()
 			data := make([]byte, len(tf.data))
 			copy(data, tf.data)
 			tf.mu.Unlock()
 
 			newPath := path.Join(newDir.path, newName)
-			if _, err := d.handler.Create(ctx, newPath, false); err != nil {
-				return syscall.EIO
+			if !destExists {
+				if _, err := d.handler.Create(ctx, newPath, false); err != nil {
+					return syscall.EIO
+				}
 			}
 			if err := d.handler.Write(ctx, newPath, data); err != nil {
 				return syscall.EIO
@@ -227,6 +342,14 @@ func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 			return fs.OK
 		}
 		// Temp-to-temp rename stays in-memory.
+		if noReplace {
+			newDir.tempMu.RLock()
+			_, destExists := newDir.tempFiles[newName]
+			newDir.tempMu.RUnlock()
+			if destExists {
+				return syscall.EEXIST
+			}
+		}
 		if d == newDir {
 			// Same directory: single lock to avoid a window where the
 			// file is absent from the map.
@@ -257,6 +380,26 @@ func (d *Dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 		return syscall.EIO
 	}
 	newPath := path.Join(newDirNode.path, newName)
+
+	if oldPath != newPath {
+		destExists, eerrno := newDirNode.childExists(ctx, newName)
+		if noReplace {
+			if eerrno != 0 {
+				return eerrno
+			}
+			if destExists {
+				return syscall.EEXIST
+			}
+		}
+		// POSIX rename replaces an existing destination. Drive permits
+		// duplicate names, so the old destination must be removed first
+		// or both files survive under the same name.
+		if destExists {
+			if err := d.handler.Delete(ctx, newPath); err != nil {
+				return syscall.EIO
+			}
+		}
+	}
 
 	if err := d.handler.Rename(ctx, oldPath, newPath); err != nil {
 		return syscall.EIO
@@ -315,13 +458,21 @@ func (d *Dir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) 
 // POSIX filesystem stats, so we return reasonable defaults that satisfy macOS
 // and editors checking filesystem capabilities.
 func (d *Dir) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
+	fillStatfs(out)
+	return fs.OK
+}
+
+// fillStatfs populates filesystem statistics shared by all node types.
+// statfs(2) is dispatched to the specific node it targets, so files must
+// report the same values as directories; unimplemented nodes report zero
+// blocks free, which makes editors refuse to save.
+func fillStatfs(out *fuse.StatfsOut) {
 	out.Bsize = 4096
 	out.Frsize = 4096
 	out.Blocks = 1 << 20 // ~4 GB apparent size
 	out.Bfree = 1 << 19
 	out.Bavail = 1 << 19
 	out.NameLen = 255
-	return fs.OK
 }
 
 // childInode creates or retrieves a child inode for the given entry.
@@ -357,13 +508,13 @@ func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *f
 type File struct {
 	fs.Inode
 
-	handler Handler
-	cache   *Cache
-	path    string
-	entry   *Entry
-	mu      sync.Mutex
-	uid     uint32
-	gid     uint32
+	handler     Handler
+	cache       *Cache
+	path        string
+	entry       *Entry
+	mu          sync.Mutex
+	uid         uint32
+	gid         uint32
 	dirty       bool    // true when content has been modified and needs flushing
 	pendingData []byte  // buffered content that survives cache TTL/eviction
 	baseContent []byte  // remote content at time of first write; used to detect remote changes
@@ -373,16 +524,56 @@ type File struct {
 
 // compile-time interface checks
 var (
-	_ fs.InodeEmbedder = (*File)(nil)
-	_ fs.NodeGetattrer = (*File)(nil)
-	_ fs.NodeSetattrer = (*File)(nil)
-	_ fs.NodeOpener    = (*File)(nil)
-	_ fs.NodeReader    = (*File)(nil)
-	_ fs.NodeWriter    = (*File)(nil)
-	_ fs.NodeFlusher   = (*File)(nil)
+	_ fs.InodeEmbedder     = (*File)(nil)
+	_ fs.NodeGetattrer     = (*File)(nil)
+	_ fs.NodeSetattrer     = (*File)(nil)
+	_ fs.NodeOpener        = (*File)(nil)
+	_ fs.NodeReader        = (*File)(nil)
+	_ fs.NodeWriter        = (*File)(nil)
+	_ fs.NodeFlusher       = (*File)(nil)
+	_ fs.NodeFsyncer       = (*File)(nil)
+	_ fs.NodeStatfser      = (*File)(nil)
+	_ fs.NodeGetlker       = (*File)(nil)
+	_ fs.NodeSetlker       = (*File)(nil)
+	_ fs.NodeSetlkwer      = (*File)(nil)
 	_ fs.NodeSetxattrer    = (*File)(nil)
 	_ fs.NodeRemovexattrer = (*File)(nil)
 )
+
+// Statfs returns the same filesystem statistics as directories; see fillStatfs.
+func (f *File) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
+	fillStatfs(out)
+	return fs.OK
+}
+
+// Getlk reports that no lock conflicts with the request. Locks are advisory
+// no-ops on this filesystem: a mount is single-user and Drive provides no
+// cross-client locking, but apps that probe locks (office suites, sqlite)
+// refuse to open files when lock calls return ENOTSUP.
+func (f *File) Getlk(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32, out *fuse.FileLock) syscall.Errno {
+	out.Typ = syscall.F_UNLCK
+	return fs.OK
+}
+
+// Setlk acquires a lock as an advisory no-op; see Getlk.
+func (f *File) Setlk(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32) syscall.Errno {
+	return fs.OK
+}
+
+// Setlkw acquires a lock, waiting if needed, as an advisory no-op; see Getlk.
+func (f *File) Setlkw(_ context.Context, _ fs.FileHandle, _ uint64, _ *fuse.FileLock, _ uint32) syscall.Errno {
+	return fs.OK
+}
+
+// Fsync persists dirty content to the backend. Editors and tools that call
+// fsync(2) on save treat an error as a failed write, so this must behave
+// like Flush rather than the go-fuse default ENOTSUP.
+func (f *File) Fsync(ctx context.Context, _ fs.FileHandle, _ uint32) syscall.Errno {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.persistLocked(ctx)
+}
 
 // Setxattr reports that the filesystem does not support extended attributes.
 // macOS cp/copyfile copies xattrs from the source onto the destination via
@@ -413,25 +604,56 @@ func (f *File) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut)
 
 // Setattr handles attribute changes (primarily truncation).
 func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	if sz, ok := in.GetSize(); ok {
-		if sz == 0 {
-			f.cache.PutContent(f.path, []byte{})
-			f.pendingData = []byte{}
-			f.dirty = true
-			if f.server != nil {
-				f.server.registerDirty(f)
-			}
-			if f.entry != nil {
-				f.entry.Size = 0
-				f.entry.ModTime = time.Now()
-			}
-		} else if f.entry != nil {
-			f.entry.Size = sz
+		if errno := f.truncateLocked(ctx, sz); errno != 0 {
+			return errno
 		}
 	}
 
 	if f.entry != nil {
 		fillAttrOut(f.entry, &out.Attr, f.uid, f.gid)
+	}
+	return fs.OK
+}
+
+// truncateLocked resizes the file content to sz bytes, shrinking or padding
+// with zeros per truncate(2), and marks the file dirty for the sync loop.
+// Persistence to the backend is deferred to Flush. Caller must hold f.mu.
+func (f *File) truncateLocked(ctx context.Context, sz uint64) syscall.Errno {
+	// Read current content, preferring pendingData from prior writes,
+	// then cache, then fresh from the handler. Truncating to zero needs
+	// no content, so it never touches the backend (see Open O_TRUNC).
+	var current []byte
+	if sz > 0 {
+		if f.pendingData != nil {
+			current = f.pendingData
+		} else if cached := f.cache.GetContent(f.path); cached != nil {
+			current = cached
+		} else {
+			content, err := f.handler.Read(ctx, f.path)
+			if err != nil {
+				return syscall.EIO
+			}
+			current = content
+		}
+	}
+
+	resized := make([]byte, sz)
+	copy(resized, current)
+
+	f.cache.PutContent(f.path, resized)
+	f.pendingData = make([]byte, sz)
+	copy(f.pendingData, resized)
+	f.dirty = true
+	if f.server != nil {
+		f.server.registerDirty(f)
+	}
+	if f.entry != nil {
+		f.entry.Size = sz
+		f.entry.ModTime = time.Now()
 	}
 	return fs.OK
 }
