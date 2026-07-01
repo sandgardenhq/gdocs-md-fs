@@ -2176,3 +2176,71 @@ func TestDirRename_TempToTemp_NoReplace_DestExists_ReturnsEEXIST(t *testing.T) {
 		t.Fatalf("Rename returned errno %d (%v), want EEXIST", errno, errno)
 	}
 }
+
+func TestDirRename_DestExistsViaStat_Replaced(t *testing.T) {
+	// With no cached listing, destination existence comes from Stat.
+	var calls []string
+	h := &stubHandler{
+		statFn: func(p string) (*Entry, error) {
+			if p == "parent/dst.md" {
+				return &Entry{Name: "dst.md", MimeType: mimeGoogleDoc}, nil
+			}
+			return nil, fmt.Errorf("stat %q: %w", p, iofs.ErrNotExist)
+		},
+		deleteFn: func(p string) error { calls = append(calls, "delete:"+p); return nil },
+		renameFn: func(o, n string) error { calls = append(calls, "rename:"+o+"->"+n); return nil },
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	errno := d.Rename(context.Background(), "src.md", d, "dst.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename returned errno %d, want 0", errno)
+	}
+	want := []string{"delete:parent/dst.md", "rename:parent/src.md->parent/dst.md"}
+	if len(calls) != 2 || calls[0] != want[0] || calls[1] != want[1] {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestDirCreate_OEXCL_StatIOError_ReturnsEIO(t *testing.T) {
+	// If existence cannot be determined, O_EXCL must not risk creating
+	// a duplicate; surface the failure instead.
+	h := &stubHandler{
+		statFn: func(string) (*Entry, error) { return nil, fmt.Errorf("network down") },
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	var out fuse.EntryOut
+	_, _, _, errno := d.Create(context.Background(), "doc.md",
+		uint32(syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY), 0o644, &out)
+	if errno != syscall.EIO {
+		t.Fatalf("Create returned errno %d (%v), want EIO", errno, errno)
+	}
+	if h.createCalled {
+		t.Error("handler.Create must not be called when existence is unknown")
+	}
+}
+
+func TestFileSetattr_TruncateUsesPendingData(t *testing.T) {
+	// Unflushed writes are the freshest content; truncation must resize
+	// them rather than stale cache or remote content.
+	h := &stubHandler{readContent: []byte("remote")}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+	_, _ = f.Write(context.Background(), nil, []byte("pending!"), 0)
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 7
+	var out fuse.AttrOut
+	if errno := f.Setattr(context.Background(), nil, in, &out); errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+	if string(f.pendingData) != "pending" {
+		t.Errorf("pendingData = %q, want %q", f.pendingData, "pending")
+	}
+}
