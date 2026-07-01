@@ -39,10 +39,19 @@ var (
 	_ fs.NodeRenamer       = (*Dir)(nil)
 	_ fs.NodeMkdirer       = (*Dir)(nil)
 	_ fs.NodeStatfser      = (*Dir)(nil)
+	_ fs.NodeSetattrer     = (*Dir)(nil)
 	_ fs.NodeFsyncer       = (*Dir)(nil)
 	_ fs.NodeSetxattrer    = (*Dir)(nil)
 	_ fs.NodeRemovexattrer = (*Dir)(nil)
 )
+
+// Setattr accepts chmod/chown/utimens on directories as a no-op and reports
+// current attributes. Google Drive has no POSIX modes or settable directory
+// times, but recursive copies (cp -Rp, rsync -a, tar -x) set them as their
+// final step and fail entirely on the go-fuse default ENOTSUP.
+func (d *Dir) Setattr(ctx context.Context, fh fs.FileHandle, _ *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	return d.Getattr(ctx, fh, out)
+}
 
 // Fsync on a directory (FSYNCDIR) is a no-op: directory metadata lives in
 // Google Drive and every mutation is persisted synchronously, so there is

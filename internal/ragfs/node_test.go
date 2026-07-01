@@ -1658,3 +1658,35 @@ func TestDirFsync_ReturnsOK(t *testing.T) {
 		t.Errorf("Dir Fsync returned errno %d, want 0", errno)
 	}
 }
+
+func TestDirSetattr_AcceptsTimesAndMode(t *testing.T) {
+	// cp -Rp, rsync -a, and tar -x set directory times/modes as their
+	// final step; the go-fuse default ENOTSUP makes the whole copy fail.
+	// Drive has no POSIX modes or settable dir times, so accept and
+	// report current attributes.
+	d := &Dir{
+		uid:   501,
+		gid:   20,
+		entry: &Entry{IsDir: true, ModTime: time.Unix(5000, 0)},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_MODE | fuse.FATTR_MTIME
+	in.Mode = 0o700
+	in.Mtime = 12345
+	var out fuse.AttrOut
+	errno := d.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d, want 0", errno)
+	}
+
+	if out.Mode != syscall.S_IFDIR|0o755 {
+		t.Errorf("out.Mode = %o, want %o (directory mode is fixed)", out.Mode, syscall.S_IFDIR|0o755)
+	}
+	if out.Uid != 501 || out.Gid != 20 {
+		t.Errorf("out uid/gid = %d/%d, want 501/20", out.Uid, out.Gid)
+	}
+	if out.Mtime != 5000 {
+		t.Errorf("out.Mtime = %d, want 5000 (entry mtime)", out.Mtime)
+	}
+}
