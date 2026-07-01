@@ -1690,3 +1690,23 @@ func TestDirSetattr_AcceptsTimesAndMode(t *testing.T) {
 		t.Errorf("out.Mtime = %d, want 5000 (entry mtime)", out.Mtime)
 	}
 }
+
+func TestFileStatfs_MatchesDirStatfs(t *testing.T) {
+	// statfs(2) is dispatched to the node it targets; files that don't
+	// implement it report zero blocks free, which makes editors checking
+	// free space before save refuse to write.
+	var fromDir, fromFile fuse.StatfsOut
+	if errno := (&Dir{}).Statfs(context.Background(), &fromDir); errno != 0 {
+		t.Fatalf("Dir Statfs returned errno %d", errno)
+	}
+	f := &File{}
+	if errno := f.Statfs(context.Background(), &fromFile); errno != 0 {
+		t.Fatalf("File Statfs returned errno %d", errno)
+	}
+	if fromFile != fromDir {
+		t.Errorf("File Statfs = %+v, want same as Dir Statfs %+v", fromFile, fromDir)
+	}
+	if fromFile.Bavail == 0 {
+		t.Error("Statfs must report free space, got Bavail=0")
+	}
+}

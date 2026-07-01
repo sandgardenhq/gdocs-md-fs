@@ -59,9 +59,16 @@ var (
 	_ fs.NodeWriter        = (*TempFile)(nil)
 	_ fs.NodeFlusher       = (*TempFile)(nil)
 	_ fs.NodeFsyncer       = (*TempFile)(nil)
+	_ fs.NodeStatfser      = (*TempFile)(nil)
 	_ fs.NodeSetxattrer    = (*TempFile)(nil)
 	_ fs.NodeRemovexattrer = (*TempFile)(nil)
 )
+
+// Statfs returns the same filesystem statistics as directories; see fillStatfs.
+func (tf *TempFile) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
+	fillStatfs(out)
+	return fs.OK
+}
 
 // Fsync is a no-op: temp files are ephemeral and in-memory, but editors
 // fsync them before renaming and treat an error as a failed save.

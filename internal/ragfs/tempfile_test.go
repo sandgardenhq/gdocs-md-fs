@@ -293,3 +293,17 @@ func TestTempFileFsync_ReturnsOK(t *testing.T) {
 		t.Errorf("Fsync returned errno %d, want 0", errno)
 	}
 }
+
+func TestTempFileStatfs_MatchesDirStatfs(t *testing.T) {
+	var fromDir, fromTemp fuse.StatfsOut
+	if errno := (&Dir{}).Statfs(context.Background(), &fromDir); errno != 0 {
+		t.Fatalf("Dir Statfs returned errno %d", errno)
+	}
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	if errno := tf.Statfs(context.Background(), &fromTemp); errno != 0 {
+		t.Fatalf("TempFile Statfs returned errno %d", errno)
+	}
+	if fromTemp != fromDir {
+		t.Errorf("TempFile Statfs = %+v, want same as Dir Statfs %+v", fromTemp, fromDir)
+	}
+}

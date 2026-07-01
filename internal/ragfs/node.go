@@ -333,13 +333,21 @@ func (d *Dir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) 
 // POSIX filesystem stats, so we return reasonable defaults that satisfy macOS
 // and editors checking filesystem capabilities.
 func (d *Dir) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
+	fillStatfs(out)
+	return fs.OK
+}
+
+// fillStatfs populates filesystem statistics shared by all node types.
+// statfs(2) is dispatched to the specific node it targets, so files must
+// report the same values as directories; unimplemented nodes report zero
+// blocks free, which makes editors refuse to save.
+func fillStatfs(out *fuse.StatfsOut) {
 	out.Bsize = 4096
 	out.Frsize = 4096
 	out.Blocks = 1 << 20 // ~4 GB apparent size
 	out.Bfree = 1 << 19
 	out.Bavail = 1 << 19
 	out.NameLen = 255
-	return fs.OK
 }
 
 // childInode creates or retrieves a child inode for the given entry.
@@ -399,9 +407,16 @@ var (
 	_ fs.NodeWriter        = (*File)(nil)
 	_ fs.NodeFlusher       = (*File)(nil)
 	_ fs.NodeFsyncer       = (*File)(nil)
+	_ fs.NodeStatfser      = (*File)(nil)
 	_ fs.NodeSetxattrer    = (*File)(nil)
 	_ fs.NodeRemovexattrer = (*File)(nil)
 )
+
+// Statfs returns the same filesystem statistics as directories; see fillStatfs.
+func (f *File) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
+	fillStatfs(out)
+	return fs.OK
+}
 
 // Fsync persists dirty content to the backend. Editors and tools that call
 // fsync(2) on save treat an error as a failed write, so this must behave
