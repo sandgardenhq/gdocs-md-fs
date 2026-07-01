@@ -58,9 +58,16 @@ var (
 	_ fs.NodeReader        = (*TempFile)(nil)
 	_ fs.NodeWriter        = (*TempFile)(nil)
 	_ fs.NodeFlusher       = (*TempFile)(nil)
+	_ fs.NodeFsyncer       = (*TempFile)(nil)
 	_ fs.NodeSetxattrer    = (*TempFile)(nil)
 	_ fs.NodeRemovexattrer = (*TempFile)(nil)
 )
+
+// Fsync is a no-op: temp files are ephemeral and in-memory, but editors
+// fsync them before renaming and treat an error as a failed save.
+func (tf *TempFile) Fsync(_ context.Context, _ fs.FileHandle, _ uint32) syscall.Errno {
+	return fs.OK
+}
 
 // Setxattr reports that the filesystem does not support extended attributes.
 // See File.Setxattr for the rationale; editors write temp files via the same

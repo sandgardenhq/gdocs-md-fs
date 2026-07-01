@@ -283,3 +283,13 @@ func TestTempFileRemovexattr_ReturnsENOTSUP(t *testing.T) {
 		t.Errorf("Removexattr returned errno %d (%v), want ENOTSUP", errno, errno)
 	}
 }
+
+func TestTempFileFsync_ReturnsOK(t *testing.T) {
+	// Temp files are ephemeral and never synced to the backend, but fsync
+	// on them must still succeed for editors that fsync before rename.
+	tf := newTempFile(".doc.md.tmp", 501, 20)
+	errno := tf.Fsync(context.Background(), nil, 0)
+	if errno != 0 {
+		t.Errorf("Fsync returned errno %d, want 0", errno)
+	}
+}

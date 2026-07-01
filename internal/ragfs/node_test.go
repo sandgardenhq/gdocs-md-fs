@@ -1600,3 +1600,61 @@ func TestCreateFuseFlags_IncludesDirectIO(t *testing.T) {
 		t.Fatal("FOPEN_DIRECT_IO is zero; test is invalid")
 	}
 }
+
+func TestFileFsync_PersistsDirtyContent(t *testing.T) {
+	// fsync(2) must persist pending writes: editors (vim), git, and rsync
+	// call it on save and treat an error as a failed write.
+	h := &stubHandler{readContent: []byte{}}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	data := []byte("# Synced\n")
+	_, _ = f.Write(context.Background(), nil, data, 0)
+
+	h.writeCalled = false
+	errno := f.Fsync(context.Background(), nil, 0)
+	if errno != 0 {
+		t.Fatalf("Fsync returned errno %d", errno)
+	}
+	if !h.writeCalled {
+		t.Error("Fsync must call handler.Write to persist dirty content")
+	}
+	if string(h.lastWritten) != string(data) {
+		t.Errorf("Fsync wrote %q, want %q", h.lastWritten, data)
+	}
+	if f.dirty {
+		t.Error("dirty should be false after successful Fsync")
+	}
+}
+
+func TestFileFsync_CleanFile_DoesNotCallHandler(t *testing.T) {
+	h := &stubHandler{readContent: []byte{}}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc},
+	}
+
+	errno := f.Fsync(context.Background(), nil, 0)
+	if errno != 0 {
+		t.Fatalf("Fsync returned errno %d", errno)
+	}
+	if h.writeCalled {
+		t.Error("Fsync must not call handler.Write for a clean file")
+	}
+}
+
+func TestDirFsync_ReturnsOK(t *testing.T) {
+	// FSYNCDIR is dispatched to NodeFsyncer on the directory; tools fsync
+	// the parent directory after a rename for durability.
+	d := &Dir{}
+	errno := d.Fsync(context.Background(), nil, 0)
+	if errno != 0 {
+		t.Errorf("Dir Fsync returned errno %d, want 0", errno)
+	}
+}

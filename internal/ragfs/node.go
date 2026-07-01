@@ -39,9 +39,18 @@ var (
 	_ fs.NodeRenamer       = (*Dir)(nil)
 	_ fs.NodeMkdirer       = (*Dir)(nil)
 	_ fs.NodeStatfser      = (*Dir)(nil)
+	_ fs.NodeFsyncer       = (*Dir)(nil)
 	_ fs.NodeSetxattrer    = (*Dir)(nil)
 	_ fs.NodeRemovexattrer = (*Dir)(nil)
 )
+
+// Fsync on a directory (FSYNCDIR) is a no-op: directory metadata lives in
+// Google Drive and every mutation is persisted synchronously, so there is
+// nothing to flush. Tools fsync the parent directory after a rename for
+// durability and treat the go-fuse default ENOTSUP as a failure.
+func (d *Dir) Fsync(_ context.Context, _ fs.FileHandle, _ uint32) syscall.Errno {
+	return fs.OK
+}
 
 // Setxattr reports that the filesystem does not support extended attributes.
 // See File.Setxattr for the rationale; directories are targeted by recursive
@@ -380,9 +389,20 @@ var (
 	_ fs.NodeReader        = (*File)(nil)
 	_ fs.NodeWriter        = (*File)(nil)
 	_ fs.NodeFlusher       = (*File)(nil)
+	_ fs.NodeFsyncer       = (*File)(nil)
 	_ fs.NodeSetxattrer    = (*File)(nil)
 	_ fs.NodeRemovexattrer = (*File)(nil)
 )
+
+// Fsync persists dirty content to the backend. Editors and tools that call
+// fsync(2) on save treat an error as a failed write, so this must behave
+// like Flush rather than the go-fuse default ENOTSUP.
+func (f *File) Fsync(ctx context.Context, _ fs.FileHandle, _ uint32) syscall.Errno {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.persistLocked(ctx)
+}
 
 // Setxattr reports that the filesystem does not support extended attributes.
 // macOS cp/copyfile copies xattrs from the source onto the destination via
