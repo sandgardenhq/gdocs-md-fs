@@ -17,12 +17,12 @@ import (
 type Dir struct {
 	fs.Inode
 
-	handler Handler
-	cache   *Cache
-	path    string
-	entry   *Entry
-	uid     uint32
-	gid     uint32
+	handler   Handler
+	cache     *Cache
+	path      string
+	entry     *Entry
+	uid       uint32
+	gid       uint32
 	server    *Server
 	logger    *log.Logger
 	tempMu    sync.RWMutex
@@ -31,14 +31,14 @@ type Dir struct {
 
 // compile-time interface checks
 var (
-	_ fs.InodeEmbedder = (*Dir)(nil)
-	_ fs.NodeReaddirer = (*Dir)(nil)
-	_ fs.NodeLookuper  = (*Dir)(nil)
-	_ fs.NodeCreater   = (*Dir)(nil)
-	_ fs.NodeUnlinker  = (*Dir)(nil)
-	_ fs.NodeRenamer   = (*Dir)(nil)
-	_ fs.NodeMkdirer   = (*Dir)(nil)
-	_ fs.NodeStatfser  = (*Dir)(nil)
+	_ fs.InodeEmbedder     = (*Dir)(nil)
+	_ fs.NodeReaddirer     = (*Dir)(nil)
+	_ fs.NodeLookuper      = (*Dir)(nil)
+	_ fs.NodeCreater       = (*Dir)(nil)
+	_ fs.NodeUnlinker      = (*Dir)(nil)
+	_ fs.NodeRenamer       = (*Dir)(nil)
+	_ fs.NodeMkdirer       = (*Dir)(nil)
+	_ fs.NodeStatfser      = (*Dir)(nil)
 	_ fs.NodeSetxattrer    = (*Dir)(nil)
 	_ fs.NodeRemovexattrer = (*Dir)(nil)
 )
@@ -357,13 +357,13 @@ func (d *Dir) childInode(ctx context.Context, e *Entry, childPath string, out *f
 type File struct {
 	fs.Inode
 
-	handler Handler
-	cache   *Cache
-	path    string
-	entry   *Entry
-	mu      sync.Mutex
-	uid     uint32
-	gid     uint32
+	handler     Handler
+	cache       *Cache
+	path        string
+	entry       *Entry
+	mu          sync.Mutex
+	uid         uint32
+	gid         uint32
 	dirty       bool    // true when content has been modified and needs flushing
 	pendingData []byte  // buffered content that survives cache TTL/eviction
 	baseContent []byte  // remote content at time of first write; used to detect remote changes
@@ -373,13 +373,13 @@ type File struct {
 
 // compile-time interface checks
 var (
-	_ fs.InodeEmbedder = (*File)(nil)
-	_ fs.NodeGetattrer = (*File)(nil)
-	_ fs.NodeSetattrer = (*File)(nil)
-	_ fs.NodeOpener    = (*File)(nil)
-	_ fs.NodeReader    = (*File)(nil)
-	_ fs.NodeWriter    = (*File)(nil)
-	_ fs.NodeFlusher   = (*File)(nil)
+	_ fs.InodeEmbedder     = (*File)(nil)
+	_ fs.NodeGetattrer     = (*File)(nil)
+	_ fs.NodeSetattrer     = (*File)(nil)
+	_ fs.NodeOpener        = (*File)(nil)
+	_ fs.NodeReader        = (*File)(nil)
+	_ fs.NodeWriter        = (*File)(nil)
+	_ fs.NodeFlusher       = (*File)(nil)
 	_ fs.NodeSetxattrer    = (*File)(nil)
 	_ fs.NodeRemovexattrer = (*File)(nil)
 )

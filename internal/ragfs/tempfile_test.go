@@ -36,8 +36,8 @@ func TestIsTempFile_NonTemp(t *testing.T) {
 		"my-file.md",
 		".hidden",
 		"backup",
-		"49130",     // not exactly "4913"
-		"a4913",     // not exactly "4913"
+		"49130", // not exactly "4913"
+		"a4913", // not exactly "4913"
 	}
 	for _, name := range nonTemps {
 		if isTempFile(name) {

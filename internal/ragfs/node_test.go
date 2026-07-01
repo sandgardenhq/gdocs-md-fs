@@ -1140,7 +1140,6 @@ func TestFileOpen_ConcurrentWriteAndOpen_NoRace(t *testing.T) {
 	<-done
 }
 
-
 func TestDirUnlink_TempFile_RemovesFromMap(t *testing.T) {
 	d := &Dir{
 		handler:   &stubHandler{},

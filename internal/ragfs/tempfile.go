@@ -51,13 +51,13 @@ type TempFile struct {
 
 // compile-time interface checks
 var (
-	_ fs.InodeEmbedder = (*TempFile)(nil)
-	_ fs.NodeGetattrer = (*TempFile)(nil)
-	_ fs.NodeSetattrer = (*TempFile)(nil)
-	_ fs.NodeOpener    = (*TempFile)(nil)
-	_ fs.NodeReader    = (*TempFile)(nil)
-	_ fs.NodeWriter    = (*TempFile)(nil)
-	_ fs.NodeFlusher   = (*TempFile)(nil)
+	_ fs.InodeEmbedder     = (*TempFile)(nil)
+	_ fs.NodeGetattrer     = (*TempFile)(nil)
+	_ fs.NodeSetattrer     = (*TempFile)(nil)
+	_ fs.NodeOpener        = (*TempFile)(nil)
+	_ fs.NodeReader        = (*TempFile)(nil)
+	_ fs.NodeWriter        = (*TempFile)(nil)
+	_ fs.NodeFlusher       = (*TempFile)(nil)
 	_ fs.NodeSetxattrer    = (*TempFile)(nil)
 	_ fs.NodeRemovexattrer = (*TempFile)(nil)
 )
