@@ -1738,3 +1738,116 @@ func TestFileSetlk_ReturnsOK(t *testing.T) {
 		t.Errorf("Setlkw returned errno %d, want 0", errno)
 	}
 }
+
+func TestFileSetattr_ShrinkTruncatesContent(t *testing.T) {
+	// truncate(2) to a nonzero size must actually resize the content and
+	// mark the file dirty, not just update the reported size.
+	content := []byte("0123456789")
+	h := &stubHandler{readContent: content}
+	cache := NewCache()
+	cache.PutContent("doc.md", content)
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: 10},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 4
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+
+	if string(f.pendingData) != "0123" {
+		t.Errorf("pendingData = %q, want %q", f.pendingData, "0123")
+	}
+	if !f.dirty {
+		t.Error("file must be dirty after truncation")
+	}
+	if f.entry.Size != 4 {
+		t.Errorf("entry.Size = %d, want 4", f.entry.Size)
+	}
+	if cached := cache.GetContent("doc.md"); string(cached) != "0123" {
+		t.Errorf("cached content = %q, want %q", cached, "0123")
+	}
+}
+
+func TestFileSetattr_GrowPadsWithZeros(t *testing.T) {
+	content := []byte("ab")
+	h := &stubHandler{readContent: content}
+	cache := NewCache()
+	cache.PutContent("doc.md", content)
+	f := &File{
+		handler: h,
+		cache:   cache,
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: 2},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 5
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+
+	want := "ab\x00\x00\x00"
+	if string(f.pendingData) != want {
+		t.Errorf("pendingData = %q, want %q", f.pendingData, want)
+	}
+	if !f.dirty {
+		t.Error("file must be dirty after truncation")
+	}
+}
+
+func TestFileSetattr_ShrinkUncached_ReadsHandler(t *testing.T) {
+	// With no cached or pending content, truncation needs the real
+	// content from the backend to shrink it.
+	h := &stubHandler{readContent: []byte("0123456789")}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: 10},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 3
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != 0 {
+		t.Fatalf("Setattr returned errno %d", errno)
+	}
+	if string(f.pendingData) != "012" {
+		t.Errorf("pendingData = %q, want %q", f.pendingData, "012")
+	}
+}
+
+func TestFileSetattr_ShrinkReadError_ReturnsEIO(t *testing.T) {
+	h := &stubHandler{readErr: fmt.Errorf("network down")}
+	f := &File{
+		handler: h,
+		cache:   NewCache(),
+		path:    "doc.md",
+		entry:   &Entry{Name: "doc.md", MimeType: mimeGoogleDoc, Size: 10},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 3
+	var out fuse.AttrOut
+	errno := f.Setattr(context.Background(), nil, in, &out)
+	if errno != syscall.EIO {
+		t.Fatalf("Setattr returned errno %d, want EIO", errno)
+	}
+	if f.dirty {
+		t.Error("file must not be dirty after failed truncation")
+	}
+}

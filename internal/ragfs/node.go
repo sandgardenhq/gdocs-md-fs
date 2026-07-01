@@ -479,25 +479,56 @@ func (f *File) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut)
 
 // Setattr handles attribute changes (primarily truncation).
 func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	if sz, ok := in.GetSize(); ok {
-		if sz == 0 {
-			f.cache.PutContent(f.path, []byte{})
-			f.pendingData = []byte{}
-			f.dirty = true
-			if f.server != nil {
-				f.server.registerDirty(f)
-			}
-			if f.entry != nil {
-				f.entry.Size = 0
-				f.entry.ModTime = time.Now()
-			}
-		} else if f.entry != nil {
-			f.entry.Size = sz
+		if errno := f.truncateLocked(ctx, sz); errno != 0 {
+			return errno
 		}
 	}
 
 	if f.entry != nil {
 		fillAttrOut(f.entry, &out.Attr, f.uid, f.gid)
+	}
+	return fs.OK
+}
+
+// truncateLocked resizes the file content to sz bytes, shrinking or padding
+// with zeros per truncate(2), and marks the file dirty for the sync loop.
+// Persistence to the backend is deferred to Flush. Caller must hold f.mu.
+func (f *File) truncateLocked(ctx context.Context, sz uint64) syscall.Errno {
+	// Read current content, preferring pendingData from prior writes,
+	// then cache, then fresh from the handler. Truncating to zero needs
+	// no content, so it never touches the backend (see Open O_TRUNC).
+	var current []byte
+	if sz > 0 {
+		if f.pendingData != nil {
+			current = f.pendingData
+		} else if cached := f.cache.GetContent(f.path); cached != nil {
+			current = cached
+		} else {
+			content, err := f.handler.Read(ctx, f.path)
+			if err != nil {
+				return syscall.EIO
+			}
+			current = content
+		}
+	}
+
+	resized := make([]byte, sz)
+	copy(resized, current)
+
+	f.cache.PutContent(f.path, resized)
+	f.pendingData = make([]byte, sz)
+	copy(f.pendingData, resized)
+	f.dirty = true
+	if f.server != nil {
+		f.server.registerDirty(f)
+	}
+	if f.entry != nil {
+		f.entry.Size = sz
+		f.entry.ModTime = time.Now()
 	}
 	return fs.OK
 }
