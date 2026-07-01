@@ -23,6 +23,11 @@ type stubHandler struct {
 	createEntry  *Entry
 	createErr    error
 	createCalled bool
+	// Optional overrides; when nil the method returns "not implemented".
+	listFn   func(path string) ([]Entry, error)
+	deleteFn func(path string) error
+	renameFn func(oldPath, newPath string) error
+	statFn   func(path string) (*Entry, error)
 }
 
 func (h *stubHandler) Read(_ context.Context, _ string) ([]byte, error) {
@@ -34,16 +39,28 @@ func (h *stubHandler) Write(_ context.Context, _ string, data []byte) error {
 	copy(h.lastWritten, data)
 	return h.writeErr
 }
-func (h *stubHandler) List(_ context.Context, _ string) ([]Entry, error) {
+func (h *stubHandler) List(_ context.Context, p string) ([]Entry, error) {
+	if h.listFn != nil {
+		return h.listFn(p)
+	}
 	return nil, fmt.Errorf("not implemented")
 }
-func (h *stubHandler) Delete(_ context.Context, _ string) error {
+func (h *stubHandler) Delete(_ context.Context, p string) error {
+	if h.deleteFn != nil {
+		return h.deleteFn(p)
+	}
 	return fmt.Errorf("not implemented")
 }
-func (h *stubHandler) Rename(_ context.Context, _, _ string) error {
+func (h *stubHandler) Rename(_ context.Context, oldPath, newPath string) error {
+	if h.renameFn != nil {
+		return h.renameFn(oldPath, newPath)
+	}
 	return fmt.Errorf("not implemented")
 }
-func (h *stubHandler) Stat(_ context.Context, _ string) (*Entry, error) {
+func (h *stubHandler) Stat(_ context.Context, p string) (*Entry, error) {
+	if h.statFn != nil {
+		return h.statFn(p)
+	}
 	return nil, fmt.Errorf("not implemented")
 }
 func (h *stubHandler) Create(_ context.Context, _ string, _ bool) (*Entry, error) {
@@ -1849,5 +1866,81 @@ func TestFileSetattr_ShrinkReadError_ReturnsEIO(t *testing.T) {
 	}
 	if f.dirty {
 		t.Error("file must not be dirty after failed truncation")
+	}
+}
+
+func TestDirRmdir_NonEmpty_ReturnsENOTEMPTY(t *testing.T) {
+	// POSIX requires rmdir to fail on a non-empty directory. Delegating
+	// to handler.Delete would silently trash the whole subtree in Drive.
+	deleteCalled := false
+	h := &stubHandler{
+		listFn: func(string) ([]Entry, error) {
+			return []Entry{{Name: "child.md", MimeType: mimeGoogleDoc}}, nil
+		},
+		deleteFn: func(string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	errno := d.Rmdir(context.Background(), "sub")
+	if errno != syscall.ENOTEMPTY {
+		t.Fatalf("Rmdir returned errno %d, want ENOTEMPTY", errno)
+	}
+	if deleteCalled {
+		t.Error("Rmdir must not delete a non-empty directory")
+	}
+}
+
+func TestDirRmdir_Empty_DeletesAndInvalidates(t *testing.T) {
+	var deletedPath string
+	h := &stubHandler{
+		listFn:   func(string) ([]Entry, error) { return nil, nil },
+		deleteFn: func(p string) error { deletedPath = p; return nil },
+	}
+	cache := NewCache()
+	// Stale cached state under the dir being removed.
+	cache.PutMetaList("parent", []Entry{{Name: "sub", IsDir: true}})
+	cache.PutContent("parent/sub/old.md", []byte("stale"))
+	d := &Dir{handler: h, cache: cache, path: "parent"}
+
+	errno := d.Rmdir(context.Background(), "sub")
+	if errno != 0 {
+		t.Fatalf("Rmdir returned errno %d, want 0", errno)
+	}
+	if deletedPath != "parent/sub" {
+		t.Errorf("deleted path = %q, want %q", deletedPath, "parent/sub")
+	}
+	if cache.GetMetaList("parent") != nil {
+		t.Error("parent meta list should be invalidated")
+	}
+	if cache.GetContent("parent/sub/old.md") != nil {
+		t.Error("cached content under the removed dir should be invalidated")
+	}
+}
+
+func TestDirRmdir_UsesCachedListing(t *testing.T) {
+	// A cached non-empty listing answers ENOTEMPTY without an API call.
+	h := &stubHandler{} // List returns an error if called
+	cache := NewCache()
+	cache.PutMetaList("parent/sub", []Entry{{Name: "child.md"}})
+	d := &Dir{handler: h, cache: cache, path: "parent"}
+
+	errno := d.Rmdir(context.Background(), "sub")
+	if errno != syscall.ENOTEMPTY {
+		t.Fatalf("Rmdir returned errno %d, want ENOTEMPTY", errno)
+	}
+}
+
+func TestDirRmdir_ListError_ReturnsEIO(t *testing.T) {
+	h := &stubHandler{
+		listFn: func(string) ([]Entry, error) { return nil, fmt.Errorf("network down") },
+	}
+	d := &Dir{handler: h, cache: NewCache(), path: "parent"}
+
+	errno := d.Rmdir(context.Background(), "sub")
+	if errno != syscall.EIO {
+		t.Fatalf("Rmdir returned errno %d, want EIO", errno)
 	}
 }

@@ -201,9 +201,33 @@ func (d *Dir) Unlink(ctx context.Context, name string) syscall.Errno {
 	return fs.OK
 }
 
-// Rmdir deletes a subdirectory from this directory.
+// Rmdir deletes a subdirectory from this directory. POSIX requires rmdir to
+// fail with ENOTEMPTY on a non-empty directory; delegating straight to the
+// handler would trash the whole subtree in Drive.
 func (d *Dir) Rmdir(ctx context.Context, name string) syscall.Errno {
-	return d.Unlink(ctx, name)
+	childPath := path.Join(d.path, name)
+
+	entries := d.cache.GetMetaList(childPath)
+	if entries == nil {
+		var err error
+		entries, err = d.handler.List(ctx, childPath)
+		if err != nil {
+			return syscall.EIO
+		}
+	}
+	if len(entries) > 0 {
+		return syscall.ENOTEMPTY
+	}
+
+	if err := d.handler.Delete(ctx, childPath); err != nil {
+		return syscall.EIO
+	}
+
+	d.cache.Invalidate(d.path)
+	d.cache.Invalidate(childPath)
+	d.cache.InvalidatePrefix(childPath + "/")
+
+	return fs.OK
 }
 
 // Rename moves or renames an entry from this directory to another.
